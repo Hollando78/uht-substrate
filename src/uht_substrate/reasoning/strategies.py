@@ -1,5 +1,6 @@
 """Query routing strategies for the reasoning engine."""
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -111,40 +112,83 @@ def analyze_intent(query: str) -> QueryIntent:
     """
     query_lower = query.lower()
 
-    # Classification intent
-    classify_patterns = [
-        "what is",
-        "what are",
-        "define",
-        "classify",
-        "describe",
-        "tell me about",
-        "explain what",
+    # Storage intent (check first - explicit user request)
+    store_patterns = [
+        "remember",
+        "store",
+        "save",
+        "note that",
+        "keep in mind",
+        "i prefer",
+        "my favorite",
     ]
-    if any(p in query_lower for p in classify_patterns):
-        return QueryIntent.CLASSIFY
+    if any(p in query_lower for p in store_patterns):
+        return QueryIntent.STORE
 
-    # Comparison intent
+    # Comparison intent (check before "why" catches these as infer)
+    # More specific patterns first
     compare_patterns = [
         "compare",
         "difference between",
         "different from",
         "similar to",
-        "vs",
+        "why is",  # "why is X similar to Y" is comparison, not inference
+        "why are",
+        "how is",  # "how is X different from Y"
+        "how are",
+        "how does",
+        "how do",
+        " vs ",
+        " vs.",
         "versus",
-        "how do .* relate",
         "relationship between",
+        "more like",
+        "closer to",
     ]
+    # Check if query contains comparison patterns AND mentions two things
     if any(p in query_lower for p in compare_patterns):
-        return QueryIntent.COMPARE
+        # Additional check: does it look like it's comparing two things?
+        two_things = re.search(
+            r"(?:compare|similar|different|like|vs|versus|between|and|to|from|with)\s+(?:a |an |the )?[a-z]+",
+            query_lower,
+        )
+        if two_things or "between" in query_lower or " vs" in query_lower:
+            return QueryIntent.COMPARE
 
-    # Inference intent
+    # Classification intent
+    classify_patterns = [
+        "what is a ",
+        "what is an ",
+        "what is the ",
+        "what is ",
+        "what are ",
+        "define ",
+        "classify ",
+        "describe ",
+        "tell me about ",
+        "explain what ",
+    ]
+    if any(query_lower.startswith(p) or f" {p}" in query_lower for p in classify_patterns):
+        return QueryIntent.CLASSIFY
+
+    # Category membership questions are also classification-like
+    # "Is X a Y?" or "Is X alive?"
+    if query_lower.startswith("is a ") or query_lower.startswith("is an "):
+        return QueryIntent.CLASSIFY
+
+    # "Can X do Y?" questions about capability
+    if query_lower.startswith("can a ") or query_lower.startswith("can an "):
+        return QueryIntent.INFER
+
+    # Inference intent (more specific patterns)
     infer_patterns = [
-        "why",
+        "why does",
+        "why do",
+        "why would",
+        "why can",
         "how come",
         "explain why",
-        "reason",
-        "because",
+        "what makes",
         "conclude",
         "infer",
         "deduce",
@@ -161,36 +205,25 @@ def analyze_intent(query: str) -> QueryIntent:
         "like this",
         "neighbors",
         "explore",
+        "what else",
     ]
     if any(p in query_lower for p in explore_patterns):
         return QueryIntent.EXPLORE
 
     # Disambiguation intent
     disambiguate_patterns = [
-        "which",
+        "which meaning",
+        "which sense",
         "do you mean",
         "clarify",
         "ambiguous",
-        "sense of",
-        "meaning of",
+        "senses of",
+        "meanings of",
     ]
     if any(p in query_lower for p in disambiguate_patterns):
         return QueryIntent.DISAMBIGUATE
 
-    # Storage intent
-    store_patterns = [
-        "remember",
-        "store",
-        "save",
-        "note that",
-        "keep in mind",
-        "i prefer",
-        "my favorite",
-    ]
-    if any(p in query_lower for p in store_patterns):
-        return QueryIntent.STORE
-
-    # Default to classify for entity-focused queries
+    # Default to general (will fall back to classification if entity found)
     return QueryIntent.GENERAL
 
 

@@ -61,13 +61,12 @@ async def disambiguate(
     return {
         "term": term,
         "language": result.language,
+        "sense_count": len(result.senses),
         "senses": [
             {
-                "sense_id": s.sense_id,
                 "definition": s.definition,
                 "hex_code": s.hex_code,
-                "entity_uuid": s.entity_uuid,
-                "examples": s.examples,
+                "examples": s.examples[:3] if s.examples else [],
             }
             for s in result.senses
         ],

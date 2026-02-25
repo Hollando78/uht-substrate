@@ -2,9 +2,31 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def parse_neo4j_datetime(value: Any) -> datetime:
+    """Parse Neo4j's broken datetime serialization format."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        # ISO format string
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, dict):
+        # Neo4j's weird internal format: _DateTime__date, _DateTime__time
+        date_part = value.get("_DateTime__date", {})
+        time_part = value.get("_DateTime__time", {})
+        return datetime(
+            year=date_part.get("_Date__year", 2000),
+            month=date_part.get("_Date__month", 1),
+            day=date_part.get("_Date__day", 1),
+            hour=time_part.get("_Time__hour", 0),
+            minute=time_part.get("_Time__minute", 0),
+            second=time_part.get("_Time__second", 0),
+        )
+    return datetime.utcnow()
 
 
 class Layer(str, Enum):
@@ -29,13 +51,43 @@ class Layer(str, Enum):
 class TraitValue(BaseModel):
     """Single trait evaluation result from classification."""
 
-    bit_position: int = Field(ge=1, le=32, alias="trait_bit", description="Bit position 1-32")
-    name: str = Field(alias="trait_name", description="Trait name")
-    present: bool = Field(alias="applicable", description="Whether trait is present")
-    confidence: float = Field(ge=0.0, le=1.0, description="Confidence score")
+    bit_position: int = Field(ge=1, le=32, description="Bit position 1-32")
+    name: str = Field(default="", description="Trait name")
+    present: bool = Field(default=False, description="Whether trait is present")
+    confidence: float = Field(ge=0.0, le=1.0, default=0.0, description="Confidence score")
     justification: Optional[str] = Field(default=None, description="Reasoning for assessment")
 
     model_config = {"populate_by_name": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_trait_format(cls, data: Any) -> Any:
+        """Handle different API response formats for traits."""
+        if not isinstance(data, dict):
+            return data
+
+        # Handle entity API format: {bit, name, evaluation: {applicable, confidence}}
+        if "bit" in data and "evaluation" in data:
+            evaluation = data.get("evaluation", {})
+            return {
+                "bit_position": data.get("bit"),
+                "name": data.get("name", ""),
+                "present": evaluation.get("applicable", False),
+                "confidence": evaluation.get("confidence", 0.0),
+                "justification": evaluation.get("justification"),
+            }
+
+        # Handle classification API format: {trait_bit, trait_name, applicable, confidence}
+        if "trait_bit" in data:
+            return {
+                "bit_position": data.get("trait_bit"),
+                "name": data.get("trait_name", ""),
+                "present": data.get("applicable", False),
+                "confidence": data.get("confidence", 0.0),
+                "justification": data.get("justification"),
+            }
+
+        return data
 
     @property
     def layer(self) -> Layer:
@@ -61,6 +113,11 @@ class ClassificationResult(BaseModel):
     created_at: datetime = Field(description="Classification timestamp")
 
     model_config = {"populate_by_name": True}
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def parse_created_at(cls, v: Any) -> datetime:
+        return parse_neo4j_datetime(v)
 
     @property
     def entity(self) -> str:
@@ -107,14 +164,23 @@ class Entity(BaseModel):
 
     uuid: str = Field(description="Entity UUID")
     name: str = Field(description="Primary name")
-    hex_code: str = Field(pattern=r"^[0-9A-Fa-f]{8}$", description="8-char hex code")
-    binary: Optional[str] = Field(default=None, description="32-bit binary string")
+    hex_code: str = Field(alias="uht_code", pattern=r"^[0-9A-Fa-f]{8}$", description="8-char hex code")
+    binary: Optional[str] = Field(default=None, alias="binary_representation", description="32-bit binary string")
     description: Optional[str] = Field(default=None, description="Entity description")
     aliases: list[str] = Field(default_factory=list, description="Alternative names")
     traits: list[TraitValue] = Field(default_factory=list, description="Trait assessments")
     wikidata_id: Optional[str] = Field(default=None, description="Wikidata Q-ID if linked")
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: Optional[datetime] = Field(default=None, description="Last update")
+
+    model_config = {"populate_by_name": True}
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, v: Any) -> datetime | None:
+        if v is None:
+            return None
+        return parse_neo4j_datetime(v)
 
     def has_trait(self, bit: int) -> bool:
         """Check if trait at bit position is present."""
@@ -129,20 +195,56 @@ class TraitDefinition(BaseModel):
     bit_position: int = Field(ge=1, le=32, alias="bit", description="Bit position 1-32")
     name: str = Field(description="Trait name")
     layer: Layer = Field(description="Classification layer")
-    description: str = Field(default="", alias="desc", description="What this trait means")
+    short_description: str = Field(default="", description="Brief description")
+    expanded_definition: str = Field(default="", description="Full definition")
+    url: Optional[str] = Field(default=None, description="Documentation URL")
     examples_present: list[str] = Field(default_factory=list, description="Entities with trait")
     examples_absent: list[str] = Field(default_factory=list, description="Entities without trait")
     classifier_prompt: Optional[str] = Field(default=None, description="LLM evaluation prompt")
 
     model_config = {"populate_by_name": True}
 
+    @property
+    def description(self) -> str:
+        """Get description (short_description for backwards compat)."""
+        return self.short_description
+
+
+class SymbolComponent(BaseModel):
+    """Symbol component of semantic triangle."""
+
+    form: str = Field(description="The word/phrase")
+    polysemy_detected: bool = Field(default=False, description="Whether multiple senses detected")
+    intended_sense: str = Field(default="", description="The intended meaning")
+    other_senses: list[str] = Field(default_factory=list, description="Alternative senses")
+
+
+class ThoughtComponent(BaseModel):
+    """Thought/reference component of semantic triangle."""
+
+    definition: str = Field(description="Conceptual definition")
+    essential_properties: list[str] = Field(default_factory=list, description="Key properties")
+    category: str = Field(default="", description="Ontological category")
+    distinguishing_features: list[str] = Field(default_factory=list, description="What makes it unique")
+
+
+class ReferentComponent(BaseModel):
+    """Referent component of semantic triangle."""
+
+    description: str = Field(description="Description of the real-world thing")
+    typical_instances: list[str] = Field(default_factory=list, description="Common examples")
+    boundaries: str = Field(default="", description="What it includes/excludes")
+    ontological_status: str = Field(default="", description="Type of existence")
+
 
 class SemanticTriangle(BaseModel):
     """Ogden-Richards semantic triangle decomposition."""
 
-    symbol: str = Field(description="The word/phrase (linguistic form)")
-    referent: str = Field(description="The real-world thing it refers to")
-    reference: str = Field(description="The mental concept/meaning")
+    symbol: SymbolComponent = Field(description="The word/phrase (linguistic form)")
+    thought: ThoughtComponent = Field(description="The mental concept/meaning")
+    referent: ReferentComponent = Field(description="The real-world thing it refers to")
+    disambiguation_confidence: float = Field(default=0.0, description="Confidence in disambiguation")
+    enriched_context: str = Field(default="", description="Summary context")
 
 
 class SimilarityResult(BaseModel):
@@ -154,12 +256,29 @@ class SimilarityResult(BaseModel):
     shared_traits: list[int] = Field(default_factory=list, description="Shared trait positions")
 
 
-class NeighborhoodNode(BaseModel):
-    """Node in neighborhood graph."""
+class SemanticSearchResult(BaseModel):
+    """Result from embedding-based semantic search."""
 
     uuid: str = Field(description="Entity UUID")
     name: str = Field(description="Entity name")
-    hex_code: str = Field(description="8-char hex code")
+    description: Optional[str] = Field(default=None, description="Entity description")
+    hex_code: str = Field(alias="uht_code", description="8-char hex code")
+    image_url: Optional[str] = Field(default=None, description="Image URL if available")
+    similarity_score: float = Field(ge=0.0, le=1.0, description="Semantic similarity score")
+
+    model_config = {"populate_by_name": True}
+
+
+class NeighborhoodNode(BaseModel):
+    """Node in neighborhood graph."""
+
+    uuid: str = Field(alias="id", description="Entity UUID")
+    name: str = Field(description="Entity name")
+    hex_code: str = Field(default="", alias="uht_code", description="8-char hex code")
+    node_type: str = Field(default="entity", alias="type", description="Node type")
+    description: Optional[str] = Field(default=None, description="Node description")
+
+    model_config = {"populate_by_name": True}
 
 
 class NeighborhoodEdge(BaseModel):
@@ -167,34 +286,62 @@ class NeighborhoodEdge(BaseModel):
 
     source: str = Field(description="Source entity UUID")
     target: str = Field(description="Target entity UUID")
-    relationship: str = Field(description="Relationship type")
-    weight: float = Field(default=1.0, description="Edge weight")
+    relationship: str = Field(default="similar", description="Relationship type")
+    weight: float = Field(default=1.0, alias="value", description="Edge weight")
+
+    model_config = {"populate_by_name": True}
 
 
 class NeighborhoodResult(BaseModel):
     """Result from neighborhood exploration."""
 
-    center: str = Field(description="Center entity UUID")
+    center: NeighborhoodNode = Field(description="Center entity")
     nodes: list[NeighborhoodNode] = Field(default_factory=list, description="Nodes in neighborhood")
-    edges: list[NeighborhoodEdge] = Field(default_factory=list, description="Edges between nodes")
+    edges: list[NeighborhoodEdge] = Field(default_factory=list, alias="links", description="Edges between nodes")
+
+    model_config = {"populate_by_name": True}
 
 
 class DisambiguationSense(BaseModel):
     """A single sense of a polysemous word."""
 
-    sense_id: str = Field(description="Sense identifier")
-    definition: str = Field(description="Sense definition")
-    hex_code: Optional[str] = Field(default=None, description="UHT code if classified")
+    definition: str = Field(alias="definition_en", description="Sense definition")
+    hex_code: Optional[str] = Field(default=None, alias="uht_code", description="UHT code if classified")
     entity_uuid: Optional[str] = Field(default=None, description="Linked entity UUID")
     examples: list[str] = Field(default_factory=list, description="Usage examples")
+    traits: list[dict] = Field(default_factory=list, description="Trait evaluations")
+
+    model_config = {"populate_by_name": True}
+
+
+class DisambiguationWord(BaseModel):
+    """Word metadata from disambiguation."""
+
+    lemma: str = Field(description="The word lemma")
+    language: str = Field(default="en", description="Language code")
+    sense_count: int = Field(default=0, description="Number of senses")
+    tier: str = Field(default="", description="Word tier")
 
 
 class DisambiguationResult(BaseModel):
     """Result from polysemy disambiguation."""
 
-    lemma: str = Field(description="The word being disambiguated")
-    language: str = Field(default="en", description="Language code")
-    senses: list[DisambiguationSense] = Field(default_factory=list, description="Word senses")
+    word: DisambiguationWord = Field(description="Word metadata")
+    senses: list[DisambiguationSense] = Field(
+        default_factory=list, alias="classified_senses", description="Word senses"
+    )
+
+    model_config = {"populate_by_name": True}
+
+    @property
+    def lemma(self) -> str:
+        """Get lemma from word object for backwards compatibility."""
+        return self.word.lemma
+
+    @property
+    def language(self) -> str:
+        """Get language from word object for backwards compatibility."""
+        return self.word.language
 
 
 class PreprocessingResult(BaseModel):

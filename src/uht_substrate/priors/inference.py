@@ -39,10 +39,13 @@ class SimilarityAnalysis:
     """Analysis of similarity between two entities."""
 
     hamming_distance: int
+    jaccard_similarity: float  # |A ∩ B| / |A ∪ B| for present traits
     shared_traits: list[int]
     differing_traits: list[int]
-    similarity_score: float
+    similarity_score: float  # Simple (32 - hamming) / 32
     can_transfer_properties: bool
+    traits_a_only: list[int] = field(default_factory=list)  # Present in A but not B
+    traits_b_only: list[int] = field(default_factory=list)  # Present in B but not A
     reasoning: list[str] = field(default_factory=list)
 
 
@@ -228,46 +231,64 @@ class PriorInferenceEngine:
         binary_a = self._hex_to_binary(hex_a)
         binary_b = self._hex_to_binary(hex_b)
 
-        shared_traits: list[int] = []
-        differing_traits: list[int] = []
+        shared_traits: list[int] = []  # 1 in both
+        differing_traits: list[int] = []  # Different between A and B
+        traits_a_only: list[int] = []  # 1 in A, 0 in B
+        traits_b_only: list[int] = []  # 0 in A, 1 in B
 
         for i in range(32):
             bit_pos = i + 1
-            if binary_a[i] == binary_b[i]:
-                if binary_a[i] == "1":
-                    shared_traits.append(bit_pos)
-            else:
+            a_has = binary_a[i] == "1"
+            b_has = binary_b[i] == "1"
+
+            if a_has and b_has:
+                shared_traits.append(bit_pos)
+            elif a_has and not b_has:
+                traits_a_only.append(bit_pos)
                 differing_traits.append(bit_pos)
+            elif b_has and not a_has:
+                traits_b_only.append(bit_pos)
+                differing_traits.append(bit_pos)
+            # else: both 0, neither has trait
 
         hamming_distance = len(differing_traits)
         similarity_score = (32 - hamming_distance) / 32
 
-        # Check if we can transfer properties based on heuristics
-        max_distance = self.heuristics.get_max_hamming_distance()
-        can_transfer = hamming_distance <= max_distance
+        # Jaccard similarity: |intersection| / |union| of present traits
+        intersection = len(shared_traits)
+        union = len(shared_traits) + len(traits_a_only) + len(traits_b_only)
+        jaccard_similarity = intersection / union if union > 0 else 1.0
+
+        # Check if we can transfer properties based on Jaccard similarity
+        # Jaccard is more meaningful than Hamming because it ignores shared zeros
+        min_jaccard = 0.5  # Require at least 50% trait overlap
+        can_transfer = jaccard_similarity >= min_jaccard
 
         reasoning = [
             f"Comparing {name_a} ({hex_a}) with {name_b} ({hex_b})",
-            f"Hamming distance: {hamming_distance}",
-            f"Similarity score: {similarity_score:.0%}",
-            f"Shared traits: {len(shared_traits)}",
+            f"Jaccard similarity: {jaccard_similarity:.0%} (shared traits / all traits)",
+            f"Hamming distance: {hamming_distance} (bit differences)",
+            f"Shared traits: {len(shared_traits)}, {name_a} only: {len(traits_a_only)}, {name_b} only: {len(traits_b_only)}",
         ]
 
         if can_transfer:
             reasoning.append(
-                f"Entities are similar enough (distance <= {max_distance}) for property transfer"
+                f"Entities share enough traits (Jaccard >= {min_jaccard:.0%}) for property transfer"
             )
         else:
             reasoning.append(
-                f"Entities too different (distance > {max_distance}) for automatic property transfer"
+                f"Entities have low trait overlap (Jaccard < {min_jaccard:.0%}), property transfer not recommended"
             )
 
         return SimilarityAnalysis(
             hamming_distance=hamming_distance,
+            jaccard_similarity=jaccard_similarity,
             shared_traits=shared_traits,
             differing_traits=differing_traits,
             similarity_score=similarity_score,
             can_transfer_properties=can_transfer,
+            traits_a_only=traits_a_only,
+            traits_b_only=traits_b_only,
             reasoning=reasoning,
         )
 

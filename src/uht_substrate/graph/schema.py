@@ -73,7 +73,7 @@ CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name);
 CREATE INDEX entity_hex IF NOT EXISTS FOR (e:Entity) ON (e.hex_code);
 CREATE INDEX entity_source IF NOT EXISTS FOR (e:Entity) ON (e.source);
 CREATE INDEX trait_layer IF NOT EXISTS FOR (t:Trait) ON (t.layer);
-CREATE INDEX trait_name IF NOT EXISTS FOR (t:Trait) ON (e.name);
+CREATE INDEX trait_name IF NOT EXISTS FOR (t:Trait) ON (t.name);
 CREATE INDEX fact_subject IF NOT EXISTS FOR (f:Fact) ON (f.subject);
 CREATE INDEX fact_predicate IF NOT EXISTS FOR (f:Fact) ON (f.predicate);
 CREATE INDEX reasoning_trace_created IF NOT EXISTS FOR (rt:ReasoningTrace) ON (rt.created_at);

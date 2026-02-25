@@ -13,6 +13,7 @@ from .models import (
     Entity,
     NeighborhoodResult,
     PreprocessingResult,
+    SemanticSearchResult,
     SemanticTriangle,
     SimilarityResult,
     TraitDefinition,
@@ -205,7 +206,8 @@ class UHTClient:
         response.raise_for_status()
 
         data = response.json()
-        results = data if isinstance(data, list) else data.get("results", [])
+        # API returns {"entities": [...], "total": N, ...}
+        results = data if isinstance(data, list) else data.get("entities", data.get("results", []))
         return [Entity.model_validate(e) for e in results]
 
     async def get_entity(self, uuid: str) -> Entity:
@@ -309,7 +311,18 @@ class UHTClient:
         response.raise_for_status()
 
         data = response.json()
-        traits_data = data if isinstance(data, list) else data.get("traits", [])
+
+        # API returns traits nested under "layers" dict
+        # Flatten into a single list
+        traits_data = []
+        if "layers" in data:
+            for layer_name, layer_traits in data["layers"].items():
+                traits_data.extend(layer_traits)
+        elif isinstance(data, list):
+            traits_data = data
+        else:
+            traits_data = data.get("traits", [])
+
         traits = [TraitDefinition.model_validate(t) for t in traits_data]
 
         # Cache for 24 hours since traits don't change often
@@ -514,7 +527,7 @@ class UHTClient:
         self,
         query: str,
         limit: int = 10,
-    ) -> list[Entity]:
+    ) -> list[SemanticSearchResult]:
         """
         Semantic similarity search using embeddings.
 
@@ -525,7 +538,7 @@ class UHTClient:
             limit: Maximum results
 
         Returns:
-            List of semantically similar entities
+            List of semantically similar entities with similarity scores
         """
         response = await self._client.post(
             "/embeddings/search",
@@ -535,7 +548,7 @@ class UHTClient:
 
         data = response.json()
         results = data if isinstance(data, list) else data.get("results", [])
-        return [Entity.model_validate(e) for e in results]
+        return [SemanticSearchResult.model_validate(e) for e in results]
 
     # =========================================================================
     # Dictionary/Disambiguation Endpoints

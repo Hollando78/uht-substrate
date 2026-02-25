@@ -450,15 +450,40 @@ class ReasoningEngine:
         trace: ReasoningTraceBuilder,
     ) -> ReasoningResult:
         """Handle general queries."""
-        # Try to extract and classify any entities mentioned
+        # Try to extract entity name
         entity_name = self._extract_entity_name(query)
 
-        if entity_name:
+        # Only fall back to classification if we have a valid-looking entity
+        if entity_name and self._is_valid_entity_name(entity_name):
+            trace.log(f"Extracted entity for classification: {entity_name}", action="extract")
             return await self._classify(query, context, trace)
 
+        # Check if this looks like a comparison question we failed to parse
+        q_lower = query.lower()
+        if any(word in q_lower for word in ["similar", "compare", "like", "different", "vs"]):
+            return ReasoningResult(
+                answer="I detected a comparison question but couldn't identify both entities. "
+                "Try: 'Compare X and Y' or 'How is X similar to Y?'",
+                confidence=0.3,
+                trace_id="",
+            )
+
+        # Check if this looks like a question about capability
+        if any(word in q_lower for word in ["can", "could", "able"]):
+            return ReasoningResult(
+                answer="I detected a capability question but couldn't parse it. "
+                "Try: 'What is X?' to learn about an entity's properties.",
+                confidence=0.3,
+                trace_id="",
+            )
+
         return ReasoningResult(
-            answer="I can help you classify entities, compare them, explore relationships, "
-            "or store facts. What would you like to know?",
+            answer="I can help you:\n"
+            "- **Classify**: 'What is a hammer?'\n"
+            "- **Compare**: 'Compare cat and dog'\n"
+            "- **Infer**: 'What properties does X have?'\n"
+            "- **Explore**: 'What's related to X?'\n"
+            "\nWhat would you like to know?",
             confidence=0.5,
             trace_id="",
         )
@@ -478,10 +503,48 @@ class ReasoningEngine:
 
         if local and self._is_fresh(local):
             trace.log_entity_lookup(entity_name, True, local.uuid)
-            return await self._uht.get_entity(local.uuid)
+            # Return a ClassificationResult from local data (don't fetch from UHT with our UUID)
+            return ClassificationResult(
+                uuid=local.uuid,
+                name=local.name,
+                hex_code=local.hex_code,
+                binary=local.binary_code,
+                traits=[],  # Traits not stored locally
+                created_at=local.created_at if isinstance(local.created_at, datetime) else datetime.utcnow(),
+            )
 
         trace.log_entity_lookup(entity_name, False)
-        trace.log(f"Classifying {entity_name} via UHT", action="api")
+
+        # Validate entity name before classifying to avoid persisting junk
+        if not self._is_valid_entity_name(entity_name):
+            trace.log(f"Skipping invalid entity name: {entity_name}", action="skip")
+            # Return a minimal result without persisting
+            return ClassificationResult(
+                uuid="invalid",
+                name=entity_name,
+                hex_code="00000000",
+                binary="0" * 32,
+                traits=[],
+                created_at=datetime.utcnow(),
+            )
+
+        # Check Factory corpus before running expensive classification
+        trace.log(f"Checking Factory corpus for {entity_name}", action="search")
+        try:
+            existing = await self._uht.search_entities(query=entity_name, limit=5)
+            # Look for exact match (case-insensitive)
+            for entity in existing:
+                if entity.name.lower() == entity_name.lower():
+                    trace.log(f"Found in Factory corpus: {entity.name} ({entity.hex_code})", action="cache_hit")
+                    # Cache locally for future lookups
+                    await self._graph.upsert_entity(entity, source="uht_factory")
+                    return entity
+        except Exception as e:
+            # If search fails, continue to classification
+            trace.log(f"Factory search failed: {e}", action="error")
+
+        # Not found in corpus - run new classification (32 GPT calls)
+        trace.log(f"Classifying {entity_name} via UHT (new)", action="api")
 
         classification = await self._uht.classify(entity_name, context=context.as_string())
         await self._graph.upsert_entity(classification, source="uht_factory")
@@ -492,7 +555,22 @@ class ReasoningEngine:
     def _is_fresh(self, entity: StoredEntity) -> bool:
         """Check if a cached entity is still fresh."""
         freshness_hours = self._settings.context_relevance_window_hours
-        age = datetime.utcnow() - entity.updated_at
+        # Handle Neo4j DateTime type by converting to Python datetime
+        updated_at = entity.updated_at
+        if hasattr(updated_at, 'to_native'):
+            # Neo4j DateTime has to_native() method
+            updated_at = updated_at.to_native()
+        elif not isinstance(updated_at, datetime):
+            # Try to extract from Neo4j DateTime
+            try:
+                updated_at = datetime(
+                    updated_at.year, updated_at.month, updated_at.day,
+                    updated_at.hour, updated_at.minute, updated_at.second
+                )
+            except (AttributeError, TypeError):
+                # If conversion fails, assume fresh
+                return True
+        age = datetime.utcnow() - updated_at.replace(tzinfo=None)
         return age < timedelta(hours=freshness_hours)
 
     def _extract_entity_name(self, query: str) -> str:
@@ -500,39 +578,190 @@ class ReasoningEngine:
         # Try quoted strings first
         quoted = re.findall(r'"([^"]+)"', query)
         if quoted:
-            return quoted[0]
+            return self._clean_entity_name(quoted[0])
 
-        # Try "what is X" pattern
-        what_is = re.search(
-            r"what (?:is|are) (?:a |an |the )?(.+?)(?:\?|$)",
-            query,
-            re.IGNORECASE,
-        )
+        # Normalize query
+        q = query.strip().rstrip("?").lower()
+
+        # Pattern 1: "what is/are [a/an/the] X"
+        what_is = re.search(r"what (?:is|are) (?:a |an |the )?(.+)", q)
         if what_is:
-            return what_is.group(1).strip()
+            return self._clean_entity_name(what_is.group(1).strip())
 
-        # Try "about X" pattern
-        about = re.search(r"about (?:a |an |the )?(.+?)(?:\?|$)", query, re.IGNORECASE)
+        # Pattern 2: "is [a/an/the] X alive/Y" - extract subject before predicate
+        is_x = re.search(r"^is (?:a |an |the )?([a-z][a-z\s\-]+?)(?:\s+(?:alive|dead|real|true|valid|a\s|an\s|the\s|like|similar|related)|\s*$)", q)
+        if is_x:
+            return self._clean_entity_name(is_x.group(1).strip())
+
+        # Pattern 3: "can [a/an/the] X be/do Y" - extract subject
+        can_x = re.search(r"^can (?:a |an |the )?([a-z][a-z\s\-]+?)\s+(?:be|do|have|make|get|become)", q)
+        if can_x:
+            return self._clean_entity_name(can_x.group(1).strip())
+
+        # Pattern 4: "why is X similar/related/like Y" - this is a comparison, return first entity
+        why_similar = re.search(r"^why (?:is|are) (?:a |an |the )?([a-z][a-z\s\-]+?)\s+(?:similar|related|like|close)", q)
+        if why_similar:
+            return self._clean_entity_name(why_similar.group(1).strip())
+
+        # Pattern 5: "about X" or "describe X" or "explain X"
+        about = re.search(r"(?:about|describe|explain|tell me about) (?:a |an |the )?(.+)", q)
         if about:
-            return about.group(1).strip()
+            return self._clean_entity_name(about.group(1).strip())
 
-        # Fall back to last noun phrase (simple heuristic)
-        words = query.split()
-        # Remove question words
-        filtered = [w for w in words if w.lower() not in {"what", "is", "are", "the", "a", "an", "?"}]
-        return " ".join(filtered[-3:]) if filtered else query
+        # Pattern 6: "classify X" or "what is the classification of X"
+        classify = re.search(r"(?:classify|classification of) (?:a |an |the )?(.+)", q)
+        if classify:
+            return self._clean_entity_name(classify.group(1).strip())
+
+        # Fallback: extract noun phrases using simple heuristic
+        # Remove common question words and verbs
+        stopwords = {
+            "what", "is", "are", "was", "were", "be", "been", "being",
+            "the", "a", "an", "this", "that", "these", "those",
+            "can", "could", "will", "would", "should", "may", "might",
+            "do", "does", "did", "have", "has", "had",
+            "how", "why", "when", "where", "who", "which",
+            "it", "its", "they", "them", "their",
+            "to", "of", "in", "on", "at", "for", "with", "by",
+            "and", "or", "but", "if", "then", "so",
+            "more", "most", "like", "similar", "related", "alive", "trained",
+        }
+
+        words = re.findall(r"[a-z][a-z\-]+", q)
+        content_words = [w for w in words if w not in stopwords and len(w) > 1]
+
+        if content_words:
+            # Take first 1-3 content words as the entity
+            entity = " ".join(content_words[:3])
+            return self._clean_entity_name(entity)
+
+        return ""
+
+    def _clean_entity_name(self, name: str) -> str:
+        """Clean extracted entity name, removing query artifacts."""
+        # Remove leading/trailing punctuation and whitespace
+        name = name.strip(" ?.,!;:")
+
+        # Skip obvious query fragments that shouldn't be classified
+        query_words = {
+            "related to", "connected to", "similar to", "compared to",
+            "entities in", "pattern as", "in database", "in the",
+            "neighborhood of", "properties of", "classification of",
+        }
+        name_lower = name.lower()
+        for fragment in query_words:
+            if name_lower.startswith(fragment):
+                # Extract the actual entity after the fragment
+                remainder = name[len(fragment):].strip()
+                if remainder:
+                    return remainder
+
+        return name
+
+    def _is_valid_entity_name(self, name: str) -> bool:
+        """Check if a name looks like a valid entity (not query noise)."""
+        if not name or len(name) < 2:
+            return False
+
+        name_lower = name.lower()
+
+        # Reject names that are clearly query fragments
+        invalid_patterns = [
+            "entities", "database", "corpus", "factory",
+            "similar", "related", "connected", "compared",
+            "neighborhood", "properties", "classification",
+            "what is", "what are", "how do", "why is",
+            "pattern", "hex code", "trait",
+            "compare ", "list ", "search ", "find ",
+        ]
+        for pattern in invalid_patterns:
+            if pattern in name_lower:
+                return False
+
+        # Reject if it ends with a question mark (query, not entity)
+        if name.endswith("?"):
+            return False
+
+        # Reject if it's mostly stopwords
+        stopwords = {"the", "a", "an", "is", "are", "of", "in", "to", "for", "with", "and", "or"}
+        words = name_lower.split()
+        if len(words) > 0:
+            stopword_ratio = sum(1 for w in words if w in stopwords) / len(words)
+            if stopword_ratio > 0.6:
+                return False
+
+        return True
 
     def _extract_entity_pair(self, query: str) -> list[str]:
         """Extract two entity names from a comparison query."""
-        # Try "X vs Y" or "X and Y" patterns
-        vs_match = re.search(r"(.+?)\s+(?:vs\.?|versus|and|compared to|with)\s+(.+?)(?:\?|$)", query, re.IGNORECASE)
-        if vs_match:
-            return [vs_match.group(1).strip(), vs_match.group(2).strip()]
+        q = query.strip().rstrip("?").lower()
 
-        # Try "between X and Y"
-        between = re.search(r"between\s+(.+?)\s+and\s+(.+?)(?:\?|$)", query, re.IGNORECASE)
+        # Pattern 1: "why is X similar/related/like Y" (check FIRST - most specific)
+        why_similar = re.search(
+            r"why (?:is|are) (?:a |an |the )?([a-z][a-z\s\-]+?)\s+(?:similar|related|like|close|comparable)\s+to\s+(?:a |an |the )?([a-z][a-z\s\-]+?)$",
+            q,
+        )
+        if why_similar:
+            return [
+                self._clean_entity_name(why_similar.group(1).strip()),
+                self._clean_entity_name(why_similar.group(2).strip()),
+            ]
+
+        # Pattern 2: "how is X different from Y" or "how does X compare to Y"
+        how_diff = re.search(
+            r"how (?:is|are|does|do) (?:a |an |the )?([a-z][a-z\s\-]+?)\s+(?:different from|compare to|relate to|similar to)\s+(?:a |an |the )?([a-z][a-z\s\-]+?)$",
+            q,
+        )
+        if how_diff:
+            return [
+                self._clean_entity_name(how_diff.group(1).strip()),
+                self._clean_entity_name(how_diff.group(2).strip()),
+            ]
+
+        # Pattern 3: "compare X and/vs/with Y" or "X vs Y" (explicit comparison)
+        clean_query = re.sub(r"^compare\s+", "", q, flags=re.IGNORECASE)
+        vs_match = re.search(
+            r"(?:a |an |the )?([a-z][a-z\s\-]+?)\s+(?:vs\.?|versus|and|compared to|with)\s+(?:a |an |the )?([a-z][a-z\s\-]+?)$",
+            clean_query,
+        )
+        if vs_match:
+            return [
+                self._clean_entity_name(vs_match.group(1).strip()),
+                self._clean_entity_name(vs_match.group(2).strip()),
+            ]
+
+        # Pattern 4: "between X and Y"
+        between = re.search(
+            r"between\s+(?:a |an |the )?([a-z][a-z\s\-]+?)\s+and\s+(?:a |an |the )?([a-z][a-z\s\-]+?)$",
+            q,
+        )
         if between:
-            return [between.group(1).strip(), between.group(2).strip()]
+            return [
+                self._clean_entity_name(between.group(1).strip()),
+                self._clean_entity_name(between.group(2).strip()),
+            ]
+
+        # Pattern 5: "is X more like Y or Z" - take first two
+        more_like = re.search(
+            r"is (?:a |an |the )?([a-z][a-z\s\-]+?)\s+more (?:like|similar to)\s+(?:a |an |the )?([a-z][a-z\s\-]+?)\s+or",
+            q,
+        )
+        if more_like:
+            return [
+                self._clean_entity_name(more_like.group(1).strip()),
+                self._clean_entity_name(more_like.group(2).strip()),
+            ]
+
+        # Pattern 6: Simple "X to Y" at end (e.g., "compare democracy to religion")
+        simple_to = re.search(
+            r"(?:a |an |the )?([a-z][a-z\s\-]+?)\s+to\s+(?:a |an |the )?([a-z][a-z\s\-]+?)$",
+            clean_query,
+        )
+        if simple_to:
+            return [
+                self._clean_entity_name(simple_to.group(1).strip()),
+                self._clean_entity_name(simple_to.group(2).strip()),
+            ]
 
         return []
 
@@ -609,18 +838,28 @@ class ReasoningEngine:
         lines = [
             f"Comparing **{name_a}** (`{hex_a}`) with **{name_b}** (`{hex_b}`)",
             "",
-            f"- Similarity: {analysis.similarity_score:.0%}",
-            f"- Hamming distance: {analysis.hamming_distance}",
+            f"**Similarity Metrics:**",
+            f"- Hamming distance: {analysis.hamming_distance} bits differ",
+            f"- Jaccard similarity: {analysis.jaccard_similarity:.0%} (shared traits / all traits)",
+            f"- Simple similarity: {analysis.similarity_score:.0%} ((32 - hamming) / 32)",
+            "",
+            f"**Trait Breakdown:**",
             f"- Shared traits: {len(analysis.shared_traits)}",
+            f"- {name_a} only: {len(analysis.traits_a_only)}",
+            f"- {name_b} only: {len(analysis.traits_b_only)}",
             "",
         ]
 
         if inheritance.is_valid:
             lines.append(f"{name_a} could be considered a type of {name_b} (inheritance score: {inheritance.inheritance_score:.0%})")
-        elif analysis.can_transfer_properties:
-            lines.append(f"These entities are similar enough to share many properties.")
+        elif analysis.jaccard_similarity >= 0.7:
+            lines.append(f"These entities share most of their traits and likely have similar properties.")
+        elif analysis.jaccard_similarity >= 0.5:
+            lines.append(f"These entities have moderate trait overlap — some property transfer is reasonable.")
+        elif analysis.jaccard_similarity >= 0.3:
+            lines.append(f"These entities have limited trait overlap — they share some properties but differ significantly.")
         else:
-            lines.append(f"These entities are quite different from each other.")
+            lines.append(f"These entities have very low trait overlap ({analysis.jaccard_similarity:.0%}) — they are fundamentally different.")
 
         return "\n".join(lines)
 

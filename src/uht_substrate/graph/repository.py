@@ -196,6 +196,48 @@ class GraphRepository:
 
         return [self._parse_entity(r["e"]) for r in result]
 
+    async def list_entities(
+        self,
+        name_contains: Optional[str] = None,
+        hex_pattern: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[StoredEntity]:
+        """
+        List entities with optional filters.
+
+        Args:
+            name_contains: Filter by name substring (case-insensitive)
+            hex_pattern: Filter by hex code prefix
+            limit: Maximum results
+
+        Returns:
+            List of matching entities
+        """
+        # Build dynamic query
+        conditions = []
+        params: dict[str, object] = {"limit": limit}
+
+        if name_contains:
+            conditions.append("toLower(e.name) CONTAINS toLower($name_filter)")
+            params["name_filter"] = name_contains
+
+        if hex_pattern:
+            conditions.append("e.hex_code STARTS WITH $hex_filter")
+            params["hex_filter"] = hex_pattern.upper()
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        query = f"""
+            MATCH (e:Entity)
+            {where_clause}
+            RETURN e
+            ORDER BY e.created_at DESC
+            LIMIT $limit
+        """
+
+        result = await self._conn.execute_query(query, params)
+        return [self._parse_entity(r["e"]) for r in result]
+
     async def find_similar_entities(
         self,
         uuid: str,
