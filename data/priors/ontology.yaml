@@ -1,0 +1,175 @@
+# Ontological Commitments
+# These are fundamental assumptions about how the world works and how classification relates to reality.
+
+# =============================================================================
+# Fundamental Assumptions
+# =============================================================================
+
+fundamental:
+  - name: "Entity Classifiability"
+    statement: "All entities can be meaningfully classified along the 32 UHT dimensions."
+    category: "classification"
+    implications:
+      - "Every concept has a hex code representation"
+      - "Classification captures essential properties"
+
+  - name: "Layer Completeness"
+    statement: "The four layers (Physical, Functional, Abstract, Social) cover all relevant dimensions of entity description."
+    category: "classification"
+    implications:
+      - "No important dimension is missing from the taxonomy"
+      - "Layers are complementary, not redundant"
+
+  - name: "Binary Trait Values"
+    statement: "Each trait is meaningfully binary - either present or absent - though confidence may vary."
+    category: "classification"
+    implications:
+      - "Partial presence is captured by confidence scores"
+      - "Classification is always definite at the trait level"
+
+# =============================================================================
+# Inheritance and Similarity
+# =============================================================================
+
+inheritance:
+  - name: "Trait Inheritance"
+    statement: "If A is-a B, then A inherits B's typical traits with high probability."
+    category: "inheritance"
+    implications:
+      - "Subcategories share properties with parent categories"
+      - "Inheritance is defeasible, not absolute"
+    confidence: 0.85
+
+  - name: "Similarity Implies Shared Properties"
+    statement: "Entities with similar hex codes (low Hamming distance) share similar properties."
+    category: "similarity"
+    implications:
+      - "Semantic similarity correlates with trait overlap"
+      - "Nearby entities in classification space behave similarly"
+    confidence: 0.8
+
+  - name: "Layer Independence"
+    statement: "Presence in one layer does not logically require presence in another."
+    category: "existence"
+    implications:
+      - "Abstract concepts need not be physical"
+      - "Physical objects need not be social constructs"
+
+# =============================================================================
+# Identity and Reference
+# =============================================================================
+
+identity:
+  - name: "Hex Code Essence"
+    statement: "Two entities with identical hex codes share essential properties."
+    category: "identity"
+    implications:
+      - "Classification captures essence"
+      - "Different names with same code are similar things"
+
+  - name: "Context-Dependent Classification"
+    statement: "The same name may refer to different entities depending on context."
+    category: "identity"
+    implications:
+      - "Disambiguation is necessary for polysemous terms"
+      - "Context affects correct classification"
+
+  - name: "Semantic Triangle"
+    statement: "Meaning involves the relationship between symbol, referent, and mental concept."
+    category: "semantics"
+    implications:
+      - "Words are not the same as things"
+      - "Understanding requires connecting symbol to concept to referent"
+
+# =============================================================================
+# Relationships
+# =============================================================================
+
+relationships:
+  - name: "Transitivity of IS_A"
+    statement: "If A is-a B and B is-a C, then A is-a C."
+    category: "relationship"
+    implications:
+      - "Hierarchical classification is transitive"
+      - "Properties propagate through IS_A chains"
+
+  - name: "Partial Transitivity of PART_OF"
+    statement: "If A part-of B and B part-of C, then A part-of C with reduced confidence."
+    category: "relationship"
+    implications:
+      - "Composition has depth limits"
+      - "Part relationships decay over distance"
+    confidence_decay: 0.8
+
+  - name: "Symmetry of SIMILAR_TO"
+    statement: "If A is similar to B, then B is similar to A."
+    category: "relationship"
+    implications:
+      - "Similarity is symmetric"
+      - "Hamming distance is symmetric"
+
+  - name: "Asymmetry of IS_A"
+    statement: "If A is-a B, it does not follow that B is-a A."
+    category: "relationship"
+    implications:
+      - "Hierarchies have direction"
+      - "Subtype relations are not reversible"
+
+# =============================================================================
+# Reasoning and Inference
+# =============================================================================
+
+reasoning:
+  - name: "Closed World for Classification"
+    statement: "If a trait is not marked present, it is assumed absent."
+    category: "inference"
+    implications:
+      - "Absence of evidence is evidence of absence for traits"
+      - "Classification is complete"
+
+  - name: "Open World for Facts"
+    statement: "Absence of a fact does not mean the fact is false."
+    category: "inference"
+    implications:
+      - "Knowledge graph is incomplete"
+      - "Missing facts should not be negated"
+
+  - name: "Confidence Propagation"
+    statement: "Inferred facts inherit confidence from their premises."
+    category: "inference"
+    implications:
+      - "Uncertainty compounds in inference chains"
+      - "Long chains produce low-confidence conclusions"
+
+# =============================================================================
+# Existence
+# =============================================================================
+
+existence:
+  - name: "Multi-Layer Existence"
+    statement: "Entities may exist simultaneously across multiple layers."
+    category: "existence"
+    implications:
+      - "A book is both physical and symbolic"
+      - "Money is both physical and social"
+
+  - name: "Temporal Contingency"
+    statement: "Entity classifications may change over time."
+    category: "existence"
+    implications:
+      - "Social constructs evolve"
+      - "Technology changes functional properties"
+
+  - name: "Observer Independence (Physical)"
+    statement: "Physical layer properties exist independently of observers."
+    category: "existence"
+    implications:
+      - "Mass and location are objective"
+      - "Physical properties are discoverable"
+
+  - name: "Observer Dependence (Social)"
+    statement: "Social layer properties require collective recognition."
+    category: "existence"
+    implications:
+      - "Social constructs exist through agreement"
+      - "Institutions depend on belief"

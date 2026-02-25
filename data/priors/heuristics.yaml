@@ -1,0 +1,189 @@
+# Reasoning Heuristics
+# Rules for how the agent should reason and make decisions.
+
+heuristics:
+  # =========================================================================
+  # Query Routing Heuristics
+  # =========================================================================
+
+  - name: "Local Graph First"
+    description: "Check local knowledge graph before querying UHT Factory API."
+    priority: 10
+    applicability: "For all entity lookups"
+    implementation: |
+      1. Query Neo4j for entity by name
+      2. If found and classification is < 24 hours old, use cached
+      3. Otherwise, query UHT Factory API
+      4. Store result in local graph
+    rationale: "Reduces API calls, enables offline operation, preserves user context"
+
+  - name: "Freshness Check"
+    description: "Consider classification staleness before using cached data."
+    priority: 9
+    applicability: "When using cached classifications"
+    implementation: |
+      - Classifications < 24 hours: use directly
+      - Classifications 24h-7d: use but flag as potentially stale
+      - Classifications > 7 days: refresh from UHT Factory
+    parameters:
+      fresh_hours: 24
+      stale_hours: 168
+
+  # =========================================================================
+  # Reasoning Heuristics
+  # =========================================================================
+
+  - name: "Occam's Razor"
+    description: "Prefer simpler explanations over complex ones."
+    priority: 8
+    applicability: "When multiple explanations are possible"
+    implementation: |
+      - When multiple classifications are possible, prefer the one with fewer active traits
+      - When multiple reasoning paths exist, prefer the shorter one
+      - Prefer existing entities over creating new hypothetical ones
+    rationale: "Simplicity correlates with correctness and comprehensibility"
+
+  - name: "Nearest Neighbor Property Transfer"
+    description: "Entities close in classification space likely share properties."
+    priority: 7
+    applicability: "When inferring unknown properties"
+    implementation: |
+      1. Find entities within Hamming distance 4
+      2. Collect properties shared by majority of neighbors
+      3. Infer these properties with confidence proportional to neighbor consensus
+    parameters:
+      max_hamming_distance: 4
+      min_neighbor_consensus: 0.6
+    rationale: "Similar things behave similarly"
+
+  - name: "Layer Specialization"
+    description: "Focus on the most relevant layer for the query type."
+    priority: 6
+    applicability: "When answering domain-specific questions"
+    implementation: |
+      Query type to layer mapping:
+      - "what is it made of" → Physical layer
+      - "what can it do" → Functional layer
+      - "what does it mean" → Abstract layer
+      - "who uses it" / "what is it for" → Social layer
+    rationale: "Different questions require different perspectives"
+
+  - name: "Trait Co-occurrence Validation"
+    description: "Use trait co-occurrence statistics to validate classifications."
+    priority: 5
+    applicability: "When validating new classifications"
+    implementation: |
+      1. Get trait co-occurrence matrix from UHT Factory
+      2. For new classification, check if trait combinations are statistically common
+      3. Flag unusual combinations for review
+    parameters:
+      anomaly_threshold: 0.01
+    rationale: "Unusual trait combinations may indicate classification errors"
+
+  # =========================================================================
+  # Confidence Heuristics
+  # =========================================================================
+
+  - name: "Confidence Threshold"
+    description: "Only assert facts above confidence threshold."
+    priority: 8
+    applicability: "When storing inferred facts"
+    implementation: |
+      - Assert as fact: confidence >= 0.7
+      - Store as possibility: confidence >= 0.5
+      - Discard: confidence < 0.5
+    parameters:
+      assertion_threshold: 0.7
+      possibility_threshold: 0.5
+    rationale: "Prevents accumulation of low-quality inferences"
+
+  - name: "Confidence Decay"
+    description: "Reduce confidence over inference chain length."
+    priority: 6
+    applicability: "For multi-step inferences"
+    implementation: |
+      final_confidence = initial_confidence * (decay_factor ^ chain_length)
+    parameters:
+      decay_factor: 0.9
+      max_chain_length: 5
+    rationale: "Uncertainty compounds with each inference step"
+
+  # =========================================================================
+  # Context Heuristics
+  # =========================================================================
+
+  - name: "Context Relevance"
+    description: "Weight recent user context more heavily."
+    priority: 5
+    applicability: "When building context for reasoning"
+    implementation: |
+      relevance_score = content_match * temporal_weight
+      temporal_weight = max(0.3, 1.0 - (age_hours / 168))
+    parameters:
+      relevance_window_hours: 168
+      min_temporal_weight: 0.3
+    rationale: "Recent context is more relevant than old context"
+
+  - name: "User Preference Priority"
+    description: "User-stated facts take precedence over inferred facts."
+    priority: 7
+    applicability: "When facts conflict"
+    implementation: |
+      Priority order:
+      1. User-stated facts (confidence 1.0)
+      2. UHT Factory classifications
+      3. Inferred facts (with confidence)
+    rationale: "User knowledge about their domain should be trusted"
+
+  # =========================================================================
+  # Disambiguation Heuristics
+  # =========================================================================
+
+  - name: "Context-Aware Disambiguation"
+    description: "Use context to select correct sense of polysemous terms."
+    priority: 7
+    applicability: "When encountering ambiguous terms"
+    implementation: |
+      1. Get all senses from UHT dictionary
+      2. Score each sense by context match
+      3. Select sense with highest score
+      4. If scores are close, ask user for clarification
+    parameters:
+      clarification_threshold: 0.2
+    rationale: "Context usually disambiguates meaning"
+
+  - name: "Domain Consistency"
+    description: "Prefer interpretations consistent with conversation domain."
+    priority: 6
+    applicability: "When multiple interpretations exist"
+    implementation: |
+      1. Identify dominant layer from recent entities
+      2. Prefer senses from the same layer
+      3. Weight by trait overlap with recent entities
+    rationale: "Conversations tend to stay in one domain"
+
+  # =========================================================================
+  # Error Handling Heuristics
+  # =========================================================================
+
+  - name: "Graceful Degradation"
+    description: "Fall back to simpler methods when complex ones fail."
+    priority: 9
+    applicability: "When reasoning encounters errors"
+    implementation: |
+      Fallback chain:
+      1. Full reasoning with axioms and heuristics
+      2. Direct classification lookup only
+      3. Similarity-based property inference
+      4. Acknowledge uncertainty
+    rationale: "Partial answers are better than no answers"
+
+  - name: "Uncertainty Acknowledgment"
+    description: "Explicitly state when conclusions are uncertain."
+    priority: 8
+    applicability: "When confidence is low"
+    implementation: |
+      Confidence < 0.5: "This is uncertain"
+      Confidence 0.5-0.7: "This is likely"
+      Confidence >= 0.7: State as fact
+    rationale: "Users need to know reliability of conclusions"

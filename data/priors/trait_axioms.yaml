@@ -1,0 +1,690 @@
+# UHT Trait Axioms
+# Each trait has axioms that derive properties when the trait is present.
+# Types: necessary (always true), typical (usually true with confidence), possible (sometimes true)
+
+# =============================================================================
+# Physical Layer (Bits 1-8)
+# =============================================================================
+
+trait_1_physical_object:
+  bit_position: 1
+  name: "Physical Object"
+  layer: physical
+  description: "A discrete, bounded physical entity that occupies space and has tangible form."
+  axioms:
+    - type: necessary
+      name: "Physical Extent"
+      statement: "Physical objects occupy space and have physical extent."
+      property: "has_physical_extent"
+    - type: necessary
+      name: "Location"
+      statement: "Physical objects have a location at any given time."
+      property: "has_location"
+    - type: typical
+      name: "Mass"
+      statement: "Physical objects typically have mass."
+      property: "has_mass"
+      confidence: 0.95
+    - type: typical
+      name: "Boundaries"
+      statement: "Physical objects typically have defined boundaries."
+      property: "has_boundaries"
+      confidence: 0.9
+
+trait_2_synthetic:
+  bit_position: 2
+  name: "Synthetic"
+  layer: physical
+  description: "Created, manufactured, or significantly shaped by human activity or intention."
+  axioms:
+    - type: necessary
+      name: "Human Origin"
+      statement: "Synthetic entities have human origin or involvement in their creation."
+      property: "has_human_origin"
+    - type: typical
+      name: "Designed Purpose"
+      statement: "Synthetic entities typically have a designed purpose."
+      property: "has_designed_purpose"
+      confidence: 0.85
+    - type: typical
+      name: "Reproducible"
+      statement: "Synthetic entities can typically be reproduced."
+      property: "is_reproducible"
+      confidence: 0.8
+
+trait_3_biological:
+  bit_position: 3
+  name: "Biological/Biomimetic"
+  layer: physical
+  description: "Has biological origin or structure inspired by biology."
+  axioms:
+    - type: necessary
+      name: "Biological Connection"
+      statement: "Has biological origin, composition, or is inspired by biological systems."
+      property: "has_biological_connection"
+    - type: typical
+      name: "Organic Composition"
+      statement: "Biological entities are typically composed of organic matter."
+      property: "has_organic_composition"
+      confidence: 0.85
+    - type: typical
+      name: "Growth Capability"
+      statement: "Biological entities typically can grow or develop."
+      property: "can_grow"
+      confidence: 0.75
+
+trait_4_powered:
+  bit_position: 4
+  name: "Powered"
+  layer: physical
+  description: "Requires external energy input to operate or perform its primary function."
+  axioms:
+    - type: necessary
+      name: "Energy Dependency"
+      statement: "Powered entities require external energy to function."
+      property: "requires_energy"
+    - type: typical
+      name: "Energy Conversion"
+      statement: "Powered entities typically convert energy from one form to another."
+      property: "converts_energy"
+      confidence: 0.9
+    - type: typical
+      name: "On/Off State"
+      statement: "Powered entities typically have on/off or active/inactive states."
+      property: "has_activation_state"
+      confidence: 0.85
+
+trait_5_structural:
+  bit_position: 5
+  name: "Structural"
+  layer: physical
+  description: "Serves a load-bearing, shape-maintaining, or structural integrity function."
+  axioms:
+    - type: necessary
+      name: "Structural Function"
+      statement: "Structural entities provide support, shape, or integrity."
+      property: "provides_structural_support"
+    - type: typical
+      name: "Load Bearing"
+      statement: "Structural entities typically bear loads or resist forces."
+      property: "bears_load"
+      confidence: 0.85
+    - type: typical
+      name: "Rigidity"
+      statement: "Structural entities typically have some degree of rigidity."
+      property: "has_rigidity"
+      confidence: 0.8
+
+trait_6_observable:
+  bit_position: 6
+  name: "Observable"
+  layer: physical
+  description: "Can be directly detected by human senses or scientific instruments."
+  axioms:
+    - type: necessary
+      name: "Detectability"
+      statement: "Observable entities can be detected by senses or instruments."
+      property: "is_detectable"
+    - type: typical
+      name: "Measurable"
+      statement: "Observable entities can typically be measured."
+      property: "is_measurable"
+      confidence: 0.9
+    - type: typical
+      name: "Verifiable"
+      statement: "Observable entities can typically be verified empirically."
+      property: "is_verifiable"
+      confidence: 0.85
+
+trait_7_physical_medium:
+  bit_position: 7
+  name: "Physical Medium"
+  layer: physical
+  description: "Composed of physical matter — has substance and mass."
+  axioms:
+    - type: necessary
+      name: "Material Composition"
+      statement: "Physical medium entities are composed of matter."
+      property: "is_material"
+    - type: necessary
+      name: "Substance"
+      statement: "Physical medium entities have substance."
+      property: "has_substance"
+    - type: typical
+      name: "Weight"
+      statement: "Physical medium entities typically have weight in a gravitational field."
+      property: "has_weight"
+      confidence: 0.95
+
+trait_8_active:
+  bit_position: 8
+  name: "Active"
+  layer: physical
+  description: "Exhibits autonomous behavior or initiates actions independently."
+  axioms:
+    - type: necessary
+      name: "Autonomous Behavior"
+      statement: "Active entities exhibit autonomous behavior."
+      property: "exhibits_autonomous_behavior"
+    - type: typical
+      name: "Self-Initiation"
+      statement: "Active entities can initiate actions without external trigger."
+      property: "can_self_initiate"
+      confidence: 0.85
+    - type: typical
+      name: "Responsiveness"
+      statement: "Active entities typically respond to environmental stimuli."
+      property: "is_responsive"
+      confidence: 0.8
+
+# =============================================================================
+# Functional Layer (Bits 9-16)
+# =============================================================================
+
+trait_9_intentionally_designed:
+  bit_position: 9
+  name: "Intentionally Designed"
+  layer: functional
+  description: "Created or adapted with a deliberate purpose or intended function."
+  axioms:
+    - type: necessary
+      name: "Purpose"
+      statement: "Intentionally designed entities have a purpose."
+      property: "has_purpose"
+    - type: necessary
+      name: "Design Intent"
+      statement: "Intentionally designed entities reflect design intent."
+      property: "has_design_intent"
+    - type: typical
+      name: "Fitness for Purpose"
+      statement: "Designed entities are typically fit for their intended purpose."
+      property: "is_fit_for_purpose"
+      confidence: 0.85
+
+trait_10_outputs_effect:
+  bit_position: 10
+  name: "Outputs Effect"
+  layer: functional
+  description: "Actively produces measurable outputs: light, sound, force, heat, or information."
+  axioms:
+    - type: necessary
+      name: "Produces Output"
+      statement: "Output-producing entities generate measurable effects."
+      property: "produces_output"
+    - type: typical
+      name: "Causally Efficacious"
+      statement: "Output-producing entities are causally efficacious."
+      property: "is_causally_efficacious"
+      confidence: 0.9
+    - type: typical
+      name: "Observable Effect"
+      statement: "Output effects are typically observable."
+      property: "has_observable_effect"
+      confidence: 0.85
+
+trait_11_processes_signals:
+  bit_position: 11
+  name: "Processes Signals/Logic"
+  layer: functional
+  description: "Interprets, transforms, routes, or computes data, signals, or logical operations."
+  axioms:
+    - type: necessary
+      name: "Signal Processing"
+      statement: "Signal processors transform input to output."
+      property: "transforms_signals"
+    - type: typical
+      name: "Input-Output Mapping"
+      statement: "Signal processors have defined input-output relationships."
+      property: "has_io_mapping"
+      confidence: 0.9
+    - type: typical
+      name: "Algorithmic"
+      statement: "Signal processing is typically algorithmic or rule-based."
+      property: "is_algorithmic"
+      confidence: 0.8
+
+trait_12_state_transforming:
+  bit_position: 12
+  name: "State-Transforming"
+  layer: functional
+  description: "Can change its own internal state or configuration based on inputs or time."
+  axioms:
+    - type: necessary
+      name: "Internal State"
+      statement: "State-transforming entities have internal states."
+      property: "has_internal_state"
+    - type: necessary
+      name: "State Change"
+      statement: "State-transforming entities can change states."
+      property: "can_change_state"
+    - type: typical
+      name: "Memory"
+      statement: "State-transforming entities typically have some form of memory."
+      property: "has_memory"
+      confidence: 0.85
+
+trait_13_human_interactive:
+  bit_position: 13
+  name: "Human-Interactive"
+  layer: functional
+  description: "Designed to be directly used, operated, or engaged with by humans."
+  axioms:
+    - type: necessary
+      name: "Human Interface"
+      statement: "Human-interactive entities have a human interface."
+      property: "has_human_interface"
+    - type: typical
+      name: "User Experience"
+      statement: "Human-interactive entities consider user experience."
+      property: "considers_user_experience"
+      confidence: 0.85
+    - type: typical
+      name: "Affordances"
+      statement: "Human-interactive entities typically have affordances for human use."
+      property: "has_affordances"
+      confidence: 0.9
+
+trait_14_system_integrated:
+  bit_position: 14
+  name: "System-Integrated"
+  layer: functional
+  description: "Operates as part of a larger system or network; function depends on context."
+  axioms:
+    - type: necessary
+      name: "System Membership"
+      statement: "System-integrated entities belong to larger systems."
+      property: "belongs_to_system"
+    - type: necessary
+      name: "Context Dependency"
+      statement: "System-integrated entities depend on their context."
+      property: "is_context_dependent"
+    - type: typical
+      name: "Interfaces"
+      statement: "System-integrated entities have interfaces with other components."
+      property: "has_system_interfaces"
+      confidence: 0.9
+
+trait_15_functionally_autonomous:
+  bit_position: 15
+  name: "Functionally Autonomous"
+  layer: functional
+  description: "Operates independently without requiring continuous external control."
+  axioms:
+    - type: necessary
+      name: "Independence"
+      statement: "Autonomous entities can operate without continuous control."
+      property: "operates_independently"
+    - type: typical
+      name: "Self-Regulation"
+      statement: "Autonomous entities typically self-regulate."
+      property: "self_regulates"
+      confidence: 0.85
+    - type: typical
+      name: "Decision Making"
+      statement: "Autonomous entities typically make decisions."
+      property: "makes_decisions"
+      confidence: 0.8
+
+trait_16_system_essential:
+  bit_position: 16
+  name: "System-Essential"
+  layer: functional
+  description: "Critical to a system's operation — removal would cause failure or degradation."
+  axioms:
+    - type: necessary
+      name: "Criticality"
+      statement: "System-essential entities are critical to system function."
+      property: "is_critical"
+    - type: typical
+      name: "Dependencies"
+      statement: "System-essential entities have other components depending on them."
+      property: "has_dependents"
+      confidence: 0.9
+    - type: typical
+      name: "Redundancy Value"
+      statement: "System-essential entities benefit from redundancy."
+      property: "benefits_from_redundancy"
+      confidence: 0.85
+
+# =============================================================================
+# Abstract Layer (Bits 17-24)
+# =============================================================================
+
+trait_17_symbolic:
+  bit_position: 17
+  name: "Symbolic"
+  layer: abstract
+  description: "Represents concepts through signs, models, or conventional meaning."
+  axioms:
+    - type: necessary
+      name: "Representation"
+      statement: "Symbolic entities represent something beyond themselves."
+      property: "represents_something"
+    - type: necessary
+      name: "Conventional Meaning"
+      statement: "Symbolic entities have conventional or agreed-upon meaning."
+      property: "has_conventional_meaning"
+    - type: typical
+      name: "Interpretable"
+      statement: "Symbolic entities require interpretation."
+      property: "requires_interpretation"
+      confidence: 0.9
+
+trait_18_signalling:
+  bit_position: 18
+  name: "Signalling"
+  layer: abstract
+  description: "Actively transmits or encodes information through signals or media."
+  axioms:
+    - type: necessary
+      name: "Information Transmission"
+      statement: "Signalling entities transmit information."
+      property: "transmits_information"
+    - type: typical
+      name: "Encoding"
+      statement: "Signalling entities encode information in some form."
+      property: "encodes_information"
+      confidence: 0.9
+    - type: typical
+      name: "Medium"
+      statement: "Signalling requires a medium or channel."
+      property: "requires_medium"
+      confidence: 0.85
+
+trait_19_rule_governed:
+  bit_position: 19
+  name: "Rule-Governed"
+  layer: abstract
+  description: "Behavior or structure defined by formal rules, algorithms, or logical systems."
+  axioms:
+    - type: necessary
+      name: "Formal Rules"
+      statement: "Rule-governed entities follow formal rules."
+      property: "follows_rules"
+    - type: typical
+      name: "Predictability"
+      statement: "Rule-governed entities are typically predictable."
+      property: "is_predictable"
+      confidence: 0.85
+    - type: typical
+      name: "Consistency"
+      statement: "Rule-governed entities behave consistently."
+      property: "is_consistent"
+      confidence: 0.9
+
+trait_20_compositional:
+  bit_position: 20
+  name: "Compositional"
+  layer: abstract
+  description: "Structured in meaningful layers, modules, or hierarchical components."
+  axioms:
+    - type: necessary
+      name: "Structure"
+      statement: "Compositional entities have internal structure."
+      property: "has_structure"
+    - type: typical
+      name: "Parts"
+      statement: "Compositional entities have identifiable parts."
+      property: "has_parts"
+      confidence: 0.95
+    - type: typical
+      name: "Hierarchy"
+      statement: "Compositional entities often have hierarchical organization."
+      property: "has_hierarchy"
+      confidence: 0.8
+
+trait_21_normative:
+  bit_position: 21
+  name: "Normative"
+  layer: abstract
+  description: "Directs, guides, or constrains behavior through rules or expectations."
+  axioms:
+    - type: necessary
+      name: "Prescriptive"
+      statement: "Normative entities prescribe or proscribe behavior."
+      property: "is_prescriptive"
+    - type: typical
+      name: "Evaluative"
+      statement: "Normative entities allow for evaluation of compliance."
+      property: "allows_evaluation"
+      confidence: 0.9
+    - type: typical
+      name: "Social Enforcement"
+      statement: "Normative entities are typically socially enforced."
+      property: "is_socially_enforced"
+      confidence: 0.8
+
+trait_22_meta:
+  bit_position: 22
+  name: "Meta"
+  layer: abstract
+  description: "Refers to itself, its category, or the conceptual structures that define it."
+  axioms:
+    - type: necessary
+      name: "Self-Reference"
+      statement: "Meta entities refer to themselves or their category."
+      property: "is_self_referential"
+    - type: typical
+      name: "Abstraction Level"
+      statement: "Meta entities operate at a higher level of abstraction."
+      property: "is_higher_order"
+      confidence: 0.9
+    - type: typical
+      name: "Conceptual"
+      statement: "Meta entities are primarily conceptual."
+      property: "is_conceptual"
+      confidence: 0.85
+
+trait_23_temporal:
+  bit_position: 23
+  name: "Temporal"
+  layer: abstract
+  description: "Time plays a defining role in identity, structure, or effect."
+  axioms:
+    - type: necessary
+      name: "Time Dependency"
+      statement: "Temporal entities depend on time for their identity or function."
+      property: "depends_on_time"
+    - type: typical
+      name: "Duration"
+      statement: "Temporal entities have duration or temporal extent."
+      property: "has_duration"
+      confidence: 0.9
+    - type: typical
+      name: "Sequence"
+      statement: "Temporal entities involve sequences or ordering."
+      property: "has_sequence"
+      confidence: 0.85
+
+trait_24_digital_virtual:
+  bit_position: 24
+  name: "Digital/Virtual"
+  layer: abstract
+  description: "Exists primarily in digital form, as data, software, or virtual representation."
+  axioms:
+    - type: necessary
+      name: "Digital Existence"
+      statement: "Digital entities exist as data or software."
+      property: "exists_as_data"
+    - type: typical
+      name: "Copyable"
+      statement: "Digital entities can be perfectly copied."
+      property: "is_copyable"
+      confidence: 0.95
+    - type: typical
+      name: "Platform Dependent"
+      statement: "Digital entities depend on computational platforms."
+      property: "is_platform_dependent"
+      confidence: 0.85
+
+# =============================================================================
+# Social Layer (Bits 25-32)
+# =============================================================================
+
+trait_25_social_construct:
+  bit_position: 25
+  name: "Social Construct"
+  layer: social
+  description: "Exists by virtue of collective human understanding or cultural meaning."
+  axioms:
+    - type: necessary
+      name: "Collective Understanding"
+      statement: "Social constructs require collective understanding to exist."
+      property: "requires_collective_understanding"
+    - type: typical
+      name: "Cultural Variation"
+      statement: "Social constructs vary across cultures."
+      property: "varies_across_cultures"
+      confidence: 0.85
+    - type: typical
+      name: "Historical Contingency"
+      statement: "Social constructs are historically contingent."
+      property: "is_historically_contingent"
+      confidence: 0.9
+
+trait_26_institutionally_defined:
+  bit_position: 26
+  name: "Institutionally Defined"
+  layer: social
+  description: "Definition depends on formal institutional rules, standards, or designations."
+  axioms:
+    - type: necessary
+      name: "Institutional Dependency"
+      statement: "Institutionally defined entities depend on institutions for their definition."
+      property: "depends_on_institutions"
+    - type: typical
+      name: "Formal Recognition"
+      statement: "Institutionally defined entities have formal recognition."
+      property: "has_formal_recognition"
+      confidence: 0.9
+    - type: typical
+      name: "Documentation"
+      statement: "Institutionally defined entities are typically documented."
+      property: "is_documented"
+      confidence: 0.85
+
+trait_27_identity_linked:
+  bit_position: 27
+  name: "Identity-Linked"
+  layer: social
+  description: "Tied to personal, social, or occupational identity, roles, or status."
+  axioms:
+    - type: necessary
+      name: "Identity Connection"
+      statement: "Identity-linked entities connect to personal or social identity."
+      property: "connects_to_identity"
+    - type: typical
+      name: "Role Association"
+      statement: "Identity-linked entities are associated with social roles."
+      property: "is_role_associated"
+      confidence: 0.85
+    - type: typical
+      name: "Status Implications"
+      statement: "Identity-linked entities have status implications."
+      property: "has_status_implications"
+      confidence: 0.8
+
+trait_28_regulated:
+  bit_position: 28
+  name: "Regulated"
+  layer: social
+  description: "Subject to formal or informal rules, laws, or institutional oversight."
+  axioms:
+    - type: necessary
+      name: "Subject to Rules"
+      statement: "Regulated entities are subject to rules or oversight."
+      property: "is_subject_to_rules"
+    - type: typical
+      name: "Compliance Requirements"
+      statement: "Regulated entities have compliance requirements."
+      property: "has_compliance_requirements"
+      confidence: 0.9
+    - type: typical
+      name: "Enforcement"
+      statement: "Regulated entities face potential enforcement."
+      property: "faces_enforcement"
+      confidence: 0.85
+
+trait_29_economically_significant:
+  bit_position: 29
+  name: "Economically Significant"
+  layer: social
+  description: "Has measurable economic value, cost, or role in economic transactions."
+  axioms:
+    - type: necessary
+      name: "Economic Value"
+      statement: "Economically significant entities have economic value or cost."
+      property: "has_economic_value"
+    - type: typical
+      name: "Market Presence"
+      statement: "Economically significant entities participate in markets."
+      property: "participates_in_markets"
+      confidence: 0.85
+    - type: typical
+      name: "Price"
+      statement: "Economically significant entities typically have a price."
+      property: "has_price"
+      confidence: 0.8
+
+trait_30_politicised:
+  bit_position: 30
+  name: "Politicised"
+  layer: social
+  description: "Subject to political discourse, debate, or partisan disagreement."
+  axioms:
+    - type: necessary
+      name: "Political Relevance"
+      statement: "Politicised entities are relevant to political discourse."
+      property: "is_politically_relevant"
+    - type: typical
+      name: "Contested"
+      statement: "Politicised entities are often contested."
+      property: "is_contested"
+      confidence: 0.85
+    - type: typical
+      name: "Power Relations"
+      statement: "Politicised entities involve power relations."
+      property: "involves_power_relations"
+      confidence: 0.8
+
+trait_31_ritualised:
+  bit_position: 31
+  name: "Ritualised"
+  layer: social
+  description: "Associated with ceremonies, traditions, or culturally significant observances."
+  axioms:
+    - type: necessary
+      name: "Ceremonial Association"
+      statement: "Ritualised entities are associated with ceremonies or traditions."
+      property: "is_ceremonially_associated"
+    - type: typical
+      name: "Symbolic Significance"
+      statement: "Ritualised entities have symbolic significance."
+      property: "has_symbolic_significance"
+      confidence: 0.9
+    - type: typical
+      name: "Repetition"
+      statement: "Ritualised activities involve repetition or recurrence."
+      property: "involves_repetition"
+      confidence: 0.85
+
+trait_32_ethically_significant:
+  bit_position: 32
+  name: "Ethically Significant"
+  layer: social
+  description: "Raises ethical questions or involves moral considerations."
+  axioms:
+    - type: necessary
+      name: "Moral Relevance"
+      statement: "Ethically significant entities raise moral questions."
+      property: "raises_moral_questions"
+    - type: typical
+      name: "Value Laden"
+      statement: "Ethically significant entities are value-laden."
+      property: "is_value_laden"
+      confidence: 0.9
+    - type: typical
+      name: "Stakeholder Impact"
+      statement: "Ethically significant entities impact stakeholders."
+      property: "impacts_stakeholders"
+      confidence: 0.85
