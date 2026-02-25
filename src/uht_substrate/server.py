@@ -552,6 +552,7 @@ async def compare_entities(
 
     # Get detailed similarity metrics if we have both hex codes
     similarity_metrics = {}
+    trait_diff = {}
     if ctx.inference and len(result.hex_codes) >= 2:
         hex_a = result.hex_codes.get(entity_a)
         hex_b = result.hex_codes.get(entity_b)
@@ -561,9 +562,15 @@ async def compare_entities(
                 "hamming_distance": analysis.hamming_distance,
                 "jaccard_similarity": round(analysis.jaccard_similarity, 3),
                 "simple_similarity": round(analysis.similarity_score, 3),
-                "shared_traits": len(analysis.shared_traits),
-                "traits_a_only": len(analysis.traits_a_only),
-                "traits_b_only": len(analysis.traits_b_only),
+                "shared_trait_count": len(analysis.shared_traits),
+                "traits_a_only_count": len(analysis.traits_a_only),
+                "traits_b_only_count": len(analysis.traits_b_only),
+            }
+            # Include actual trait names for detailed analysis
+            trait_diff = {
+                "shared_traits": analysis.get_shared_trait_names(),
+                "traits_a_only": analysis.get_traits_a_only_names(),
+                "traits_b_only": analysis.get_traits_b_only_names(),
             }
 
     return {
@@ -571,9 +578,90 @@ async def compare_entities(
         "entity_b": entity_b,
         "hex_codes": result.hex_codes,
         "similarity": similarity_metrics,
+        "trait_diff": trait_diff,
         "comparison": result.answer,
         "confidence": result.confidence,
         "trace_id": result.trace_id,
+    }
+
+
+@mcp.tool()
+async def batch_compare(
+    entity: str,
+    candidates: list[str],
+) -> dict[str, Any]:
+    """
+    Compare one entity against multiple candidates, returning ranked results.
+
+    This is the efficient way to find the best match from a set of candidates.
+    Returns all comparisons sorted by Jaccard similarity (highest first).
+
+    Typical workflow:
+    1. semantic_search("chair") → get candidate names
+    2. batch_compare("chair", ["stool", "bench", "sofa", "table"]) → ranked Jaccard table
+
+    Args:
+        entity: The entity to compare against all candidates
+        candidates: List of candidate entities to compare with (max 20)
+
+    Returns:
+        Ranked list of comparisons sorted by Jaccard similarity
+    """
+    if not ctx.uht or not ctx.inference:
+        return {"error": "Engine not initialized"}
+
+    candidates = candidates[:20]  # Limit to 20 candidates
+
+    # First classify the main entity
+    try:
+        main_class = await ctx.uht.classify(entity)
+    except Exception as e:
+        return {"error": f"Failed to classify {entity}: {e}"}
+
+    # Classify all candidates in parallel
+    import asyncio
+    async def classify_candidate(name: str):
+        try:
+            return (name, await ctx.uht.classify(name))
+        except Exception:
+            return (name, None)
+
+    candidate_results = await asyncio.gather(
+        *[classify_candidate(c) for c in candidates]
+    )
+
+    # Compare and build results
+    comparisons = []
+    for name, classification in candidate_results:
+        if classification is None:
+            continue
+
+        analysis = ctx.inference.analyze_similarity(
+            main_class.hex_code,
+            classification.hex_code,
+            entity,
+            name,
+        )
+
+        comparisons.append({
+            "candidate": name,
+            "hex_code": classification.hex_code,
+            "jaccard_similarity": round(analysis.jaccard_similarity, 3),
+            "hamming_distance": analysis.hamming_distance,
+            "shared_traits": analysis.get_shared_trait_names(),
+            "traits_entity_only": analysis.get_traits_a_only_names(),
+            "traits_candidate_only": analysis.get_traits_b_only_names(),
+        })
+
+    # Sort by Jaccard (highest first)
+    comparisons.sort(key=lambda x: x["jaccard_similarity"], reverse=True)
+
+    return {
+        "entity": entity,
+        "hex_code": main_class.hex_code,
+        "comparisons": comparisons,
+        "best_match": comparisons[0]["candidate"] if comparisons else None,
+        "best_jaccard": comparisons[0]["jaccard_similarity"] if comparisons else None,
     }
 
 
@@ -1441,6 +1529,12 @@ class DisambiguateRequest(BaseModel):
     language: str = "en"
 
 
+class BatchCompareRequest(BaseModel):
+    """Request model for batch compare endpoint."""
+    entity: str
+    candidates: list[str]
+
+
 # Create FastAPI app for REST endpoints
 rest_api = FastAPI(
     title="UHT Substrate API",
@@ -1469,6 +1563,7 @@ async def api_root():
             "GET /patterns": "Reasoning patterns for tool orchestration",
             "POST /classify": "Classify an entity",
             "POST /compare": "Compare two entities",
+            "POST /batch-compare": "Compare entity against multiple candidates",
             "POST /search": "Semantic search for similar entities",
             "POST /disambiguate": "Get word senses for polysemous terms",
             "GET /entities": "List entities in local graph",
@@ -1505,6 +1600,12 @@ async def api_classify(request: ClassifyRequest):
 async def api_compare(request: CompareRequest):
     """Compare two entities."""
     return await compare_entities(request.entity_a, request.entity_b)
+
+
+@rest_api.post("/batch-compare")
+async def api_batch_compare(request: BatchCompareRequest):
+    """Compare entity against multiple candidates, ranked by Jaccard."""
+    return await batch_compare(request.entity, request.candidates)
 
 
 @rest_api.post("/search")

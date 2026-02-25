@@ -10,6 +10,46 @@ from .trait_axioms import TraitAxiomRepository
 
 logger = get_logger(__name__)
 
+# Canonical trait names (bit position -> name)
+TRAIT_NAMES: dict[int, str] = {
+    # Physical layer (1-8)
+    1: "Physical Object",
+    2: "Synthetic",
+    3: "Biological/Biomimetic",
+    4: "Powered",
+    5: "Structural",
+    6: "Observable",
+    7: "Physical Medium",
+    8: "Active",
+    # Functional layer (9-16)
+    9: "Intentionally Designed",
+    10: "Outputs Effect",
+    11: "Processes Signals/Logic",
+    12: "State-Transforming",
+    13: "Human-Interactive",
+    14: "System-Integrated",
+    15: "Functionally Autonomous",
+    16: "System-Essential",
+    # Abstract layer (17-24)
+    17: "Symbolic",
+    18: "Signalling",
+    19: "Rule-Governed",
+    20: "Compositional",
+    21: "Normative",
+    22: "Meta",
+    23: "Temporal",
+    24: "Digital/Virtual",
+    # Social layer (25-32)
+    25: "Social Construct",
+    26: "Institutionally Defined",
+    27: "Identity-Linked",
+    28: "Regulated",
+    29: "Economically Significant",
+    30: "Politicised",
+    31: "Ritualised",
+    32: "Ethically Significant",
+}
+
 
 @dataclass
 class InferredProperty:
@@ -47,6 +87,18 @@ class SimilarityAnalysis:
     traits_a_only: list[int] = field(default_factory=list)  # Present in A but not B
     traits_b_only: list[int] = field(default_factory=list)  # Present in B but not A
     reasoning: list[str] = field(default_factory=list)
+
+    def get_shared_trait_names(self) -> list[str]:
+        """Get names of shared traits."""
+        return [TRAIT_NAMES.get(b, f"Bit {b}") for b in self.shared_traits]
+
+    def get_traits_a_only_names(self) -> list[str]:
+        """Get names of traits only in entity A."""
+        return [TRAIT_NAMES.get(b, f"Bit {b}") for b in self.traits_a_only]
+
+    def get_traits_b_only_names(self) -> list[str]:
+        """Get names of traits only in entity B."""
+        return [TRAIT_NAMES.get(b, f"Bit {b}") for b in self.traits_b_only]
 
 
 class PriorInferenceEngine:
