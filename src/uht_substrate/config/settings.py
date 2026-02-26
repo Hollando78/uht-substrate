@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     server_host: str = "localhost"
     server_port: int = 8765
 
+    # Authentication
+    api_key: str = Field(default="", description="Bearer token for API auth. Empty = no auth.")
+
     # Logging
     log_level: str = "INFO"
 

@@ -80,6 +80,7 @@ class UHTClient:
         entity: str,
         context: Optional[str] = None,
         force_refresh: bool = False,
+        namespace: Optional[str] = None,
     ) -> ClassificationResult:
         """
         Classify an entity using 32 parallel trait evaluators.
@@ -90,11 +91,14 @@ class UHTClient:
             entity: Entity name to classify
             context: Optional context to guide classification
             force_refresh: Skip cache and force fresh classification
+            namespace: Optional namespace for cache key differentiation
 
         Returns:
             Classification result with hex code and trait assessments
         """
-        cache_key = f"classify:{entity}:{context or ''}"
+        # Cache key includes entity, context, and namespace
+        # Same entity in different namespaces/contexts may have different classifications
+        cache_key = f"classify:{entity}:{context or ''}:{namespace or 'global'}"
 
         if not force_refresh:
             cached = self._cache.get(cache_key)
@@ -259,7 +263,8 @@ class UHTClient:
         response.raise_for_status()
 
         data = response.json()
-        results = data if isinstance(data, list) else data.get("results", [])
+        # API returns {"source_entity": {...}, "similar_entities": [...], "threshold": N}
+        results = data if isinstance(data, list) else data.get("similar_entities", data.get("results", []))
         return [SimilarityResult.model_validate(r) for r in results]
 
     async def search_by_pattern(
@@ -286,7 +291,8 @@ class UHTClient:
         response.raise_for_status()
 
         data = response.json()
-        results = data if isinstance(data, list) else data.get("results", [])
+        # API returns {"entities": [...], "total": N, ...}
+        results = data if isinstance(data, list) else data.get("entities", data.get("results", []))
         return [Entity.model_validate(e) for e in results]
 
     # =========================================================================

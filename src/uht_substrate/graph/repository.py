@@ -39,6 +39,13 @@ class StoredFact:
     confidence: float
     source: str
     created_at: datetime
+    category: str = "associative"
+    is_custom_predicate: bool = False
+    bound: bool = False
+    subject_entity_uuid: Optional[str] = None
+    object_entity_uuid: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    _is_duplicate: bool = False  # Transient flag, not persisted
 
 
 @dataclass
@@ -51,6 +58,19 @@ class StoredReasoningTrace:
     strategy: str
     confidence: float
     created_at: datetime
+
+
+@dataclass
+class StoredNamespace:
+    """Namespace as stored in the knowledge graph."""
+
+    uuid: str
+    code: str
+    name: str
+    description: Optional[str]
+    is_root: bool
+    created_at: datetime
+    entity_count: int = 0
 
 
 class GraphRepository:
@@ -74,6 +94,7 @@ class GraphRepository:
         classification: ClassificationResult | Entity,
         source: str = "uht_factory",
         description: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> StoredEntity:
         """
         Upsert an entity from classification result.
@@ -82,6 +103,7 @@ class GraphRepository:
             classification: Classification result or Entity
             source: Source of the entity ("uht_factory", "user_defined", "inferred")
             description: Optional description override
+            namespace: Optional namespace code (defaults to "global")
 
         Returns:
             The stored entity
@@ -124,8 +146,13 @@ class GraphRepository:
                         "entity_uuid": uuid,
                         "bit_position": trait.bit_position,
                         "confidence": trait.confidence,
+                        "justification": trait.justification,
                     },
                 )
+
+        # Assign to namespace (default to global)
+        ns_code = namespace or "global"
+        await self.assign_entity_to_namespace(uuid, ns_code, primary=True)
 
         return StoredEntity(
             uuid=uuid,
@@ -200,6 +227,7 @@ class GraphRepository:
         self,
         name_contains: Optional[str] = None,
         hex_pattern: Optional[str] = None,
+        namespace: Optional[str] = None,
         limit: int = 100,
     ) -> list[StoredEntity]:
         """
@@ -208,11 +236,21 @@ class GraphRepository:
         Args:
             name_contains: Filter by name substring (case-insensitive)
             hex_pattern: Filter by hex code prefix
+            namespace: Filter by namespace (includes descendants)
             limit: Maximum results
 
         Returns:
             List of matching entities
         """
+        # If namespace filter provided, use the namespace-specific method
+        if namespace:
+            return await self.list_entities_in_namespace(
+                namespace_code=namespace,
+                name_contains=name_contains,
+                hex_pattern=hex_pattern,
+                limit=limit,
+            )
+
         # Build dynamic query
         conditions = []
         params: dict[str, object] = {"limit": limit}
@@ -398,34 +436,76 @@ class GraphRepository:
         predicate: str,
         obj: str,
         confidence: float = 1.0,
-        source: str = "user",
+        source: str = "asserted",
         user_id: Optional[str] = None,
         trace_uuid: Optional[str] = None,
     ) -> StoredFact:
         """
         Store a fact in the knowledge graph.
 
+        Predicates are normalized to uppercase and categorized against the
+        predicate taxonomy. Unknown predicates are stored under 'associative'
+        with is_custom_predicate=True. The 'computed' category is reserved
+        for system operations and rejected when source is 'asserted'.
+
         Args:
             subject: Subject of the fact
             predicate: Predicate/relationship
             obj: Object of the fact
             confidence: Confidence level (0-1)
-            source: Source of the fact
+            source: Source of the fact ('asserted', 'computed', 'inferred')
             user_id: Optional user ID to link fact to
             trace_uuid: Optional reasoning trace UUID
 
         Returns:
             The stored fact
+
+        Raises:
+            ValueError: If a computed predicate is used with source='asserted'
         """
+        from .schema import PredicateTaxonomy
+
+        normalized_predicate = predicate.strip().upper().replace(" ", "_")
+        category, is_custom = PredicateTaxonomy.categorize(normalized_predicate)
+
+        # Check for duplicate (same subject + predicate + object)
+        existing = await self._conn.execute_query(
+            queries.FIND_DUPLICATE_FACT,
+            {
+                "subject": subject,
+                "predicate": normalized_predicate,
+                "object": obj,
+            },
+        )
+        if existing:
+            fact = self._parse_fact(existing[0]["f"])
+            fact.is_custom_predicate = is_custom  # Ensure current taxonomy
+            fact._is_duplicate = True
+            logger.debug(
+                "Duplicate fact found",
+                uuid=fact.uuid,
+                subject=subject,
+                predicate=normalized_predicate,
+            )
+            return fact
+
+        if source == "asserted" and category == "computed":
+            raise ValueError(
+                f"Predicate '{predicate}' is in the 'computed' category "
+                "and cannot be set by users. Use a different predicate."
+            )
+
         fact_uuid = str(uuid7())
 
         params = {
             "uuid": fact_uuid,
             "subject": subject,
-            "predicate": predicate,
+            "predicate": normalized_predicate,
             "object": obj,
             "confidence": confidence,
             "source": source,
+            "category": category,
+            "is_custom_predicate": is_custom,
         }
 
         result = await self._conn.execute_write(queries.CREATE_FACT, params)
@@ -449,16 +529,34 @@ class GraphRepository:
                 {"trace_uuid": trace_uuid, "fact_uuid": fact_uuid},
             )
 
-        logger.debug("Stored fact", uuid=fact_uuid, subject=subject, predicate=predicate)
+        # Attempt entity binding
+        subj_uuid, obj_uuid = await self._try_bind_fact(
+            fact_uuid, subject, obj, normalized_predicate, category,
+            confidence, source, user_id,
+        )
+
+        logger.debug(
+            "Stored fact",
+            uuid=fact_uuid,
+            subject=subject,
+            predicate=normalized_predicate,
+            category=category,
+            bound=bool(subj_uuid and obj_uuid),
+        )
 
         return StoredFact(
             uuid=fact_uuid,
             subject=subject,
-            predicate=predicate,
+            predicate=normalized_predicate,
             object=obj,
             confidence=confidence,
             source=source,
             created_at=fact_data.get("created_at", datetime.utcnow()),
+            category=category,
+            is_custom_predicate=is_custom,
+            bound=bool(subj_uuid and obj_uuid),
+            subject_entity_uuid=subj_uuid,
+            object_entity_uuid=obj_uuid,
         )
 
     async def get_facts_by_subject(
@@ -504,6 +602,382 @@ class GraphRepository:
         )
 
         return [self._parse_fact(r["f"]) for r in result]
+
+    async def query_facts(
+        self,
+        subject: Optional[str] = None,
+        object_value: Optional[str] = None,
+        predicate: Optional[str] = None,
+        category: Optional[str] = None,
+        source: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[StoredFact]:
+        """
+        Query facts with flexible filters.
+
+        Args:
+            subject: Filter by subject (case-insensitive)
+            object_value: Filter by object (case-insensitive)
+            predicate: Filter by exact predicate
+            category: Filter by predicate category
+            source: Filter by source type
+            user_id: Scope to facts owned by this user
+            limit: Maximum results
+
+        Returns:
+            List of matching facts
+        """
+        # Normalize predicate to uppercase if provided
+        if predicate:
+            predicate = predicate.strip().upper().replace(" ", "_")
+
+        if user_id:
+            result = await self._conn.execute_query(
+                queries.QUERY_USER_FACTS,
+                {
+                    "user_id": user_id,
+                    "subject": subject,
+                    "object": object_value,
+                    "predicate": predicate,
+                    "category": category,
+                    "source": source,
+                    "limit": limit,
+                },
+            )
+        else:
+            result = await self._conn.execute_query(
+                queries.QUERY_FACTS,
+                {
+                    "subject": subject,
+                    "object": object_value,
+                    "predicate": predicate,
+                    "category": category,
+                    "source": source,
+                    "limit": limit,
+                },
+            )
+
+        return [self._parse_fact(r["f"]) for r in result]
+
+    async def update_fact(
+        self,
+        uuid: str,
+        subject: Optional[str] = None,
+        predicate: Optional[str] = None,
+        obj: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> Optional[StoredFact]:
+        """
+        Update a fact's fields. Only provided (non-None) fields are updated.
+
+        Re-validates predicate against taxonomy if changed. Re-attempts
+        entity binding if subject or object changes.
+
+        Args:
+            uuid: Fact UUID
+            subject: New subject (None to keep current)
+            predicate: New predicate (None to keep current)
+            obj: New object (None to keep current)
+            confidence: New confidence (None to keep current)
+
+        Returns:
+            Updated fact, or None if not found
+        """
+        from .schema import PredicateTaxonomy
+
+        category = None
+        is_custom = None
+        normalized_predicate = None
+
+        if predicate:
+            normalized_predicate = predicate.strip().upper().replace(" ", "_")
+            category, is_custom = PredicateTaxonomy.categorize(normalized_predicate)
+            if category == "computed":
+                raise ValueError(
+                    f"Predicate '{predicate}' is in the 'computed' category "
+                    "and cannot be set by users."
+                )
+
+        result = await self._conn.execute_write(
+            queries.UPDATE_FACT,
+            {
+                "uuid": uuid,
+                "subject": subject,
+                "predicate": normalized_predicate,
+                "object": obj,
+                "confidence": confidence,
+                "category": category,
+                "is_custom_predicate": is_custom,
+            },
+        )
+
+        if not result:
+            return None
+
+        fact = self._parse_fact(result[0]["f"])
+
+        # Re-attempt binding if subject or object changed
+        if subject or obj:
+            subj_uuid, obj_uuid = await self._try_bind_fact(
+                uuid, fact.subject, fact.object, fact.predicate,
+                fact.category, fact.confidence, fact.source, None,
+            )
+            fact.bound = bool(subj_uuid and obj_uuid)
+            fact.subject_entity_uuid = subj_uuid
+            fact.object_entity_uuid = obj_uuid
+
+        return fact
+
+    async def delete_fact(self, uuid: str) -> bool:
+        """
+        Delete a fact and all its relationships.
+
+        Removes the Fact node, OWNS_FACT edges, FACT_ABOUT/FACT_REFERENCES
+        edges, and any RELATED_TO entity edges linked by fact_uuid.
+
+        Args:
+            uuid: Fact UUID
+
+        Returns:
+            True if deleted, False if not found
+        """
+        # First remove any entity relationship created from this fact
+        await self._conn.execute_write(
+            queries.DELETE_ENTITY_RELATIONSHIP_BY_FACT,
+            {"fact_uuid": uuid},
+        )
+
+        # Then delete the fact node (DETACH DELETE removes remaining edges)
+        result = await self._conn.execute_write(
+            queries.DELETE_FACT,
+            {"uuid": uuid},
+        )
+        deleted = bool(result and result[0].get("deleted_uuid"))
+        if deleted:
+            logger.debug("Deleted fact", uuid=uuid)
+        return deleted
+
+    async def bind_pending_facts(self, limit: int = 100) -> dict[str, int]:
+        """
+        Attempt to bind unbound facts to classified entity nodes.
+
+        Scans facts where bound=false and tries to match subject/object
+        to existing Entity nodes by name.
+
+        Args:
+            limit: Maximum facts to process
+
+        Returns:
+            Counts: {"checked": N, "newly_bound": M}
+        """
+        result = await self._conn.execute_query(
+            queries.FIND_UNBOUND_FACTS,
+            {"limit": limit},
+        )
+
+        checked = 0
+        newly_bound = 0
+        for row in result:
+            f = row["f"]
+            subj_uuid, obj_uuid = await self._try_bind_fact(
+                f["uuid"], f["subject"], f["object"],
+                f.get("predicate", "RELATED_TO"),
+                f.get("category", "associative"),
+                f.get("confidence", 1.0),
+                f.get("source", "asserted"),
+                None,
+            )
+            checked += 1
+            if subj_uuid and obj_uuid:
+                newly_bound += 1
+
+        logger.info("Binding pass complete", checked=checked, newly_bound=newly_bound)
+        return {"checked": checked, "newly_bound": newly_bound}
+
+    async def bind_pending_facts_for_entity(self, entity_name: str) -> dict[str, int]:
+        """
+        Attempt to bind unbound facts that reference a specific entity.
+
+        Called after classify_entity to retroactively bind facts that were
+        stored before the entity was classified.
+
+        Args:
+            entity_name: Name of the newly classified entity
+
+        Returns:
+            Counts: {"checked": N, "newly_bound": M}
+        """
+        result = await self._conn.execute_query(
+            queries.FIND_UNBOUND_FACTS_FOR_ENTITY,
+            {"entity_name": entity_name},
+        )
+
+        checked = 0
+        newly_bound = 0
+        for row in result:
+            f = row["f"]
+            subj_uuid, obj_uuid = await self._try_bind_fact(
+                f["uuid"], f["subject"], f["object"],
+                f.get("predicate", "RELATED_TO"),
+                f.get("category", "associative"),
+                f.get("confidence", 1.0),
+                f.get("source", "asserted"),
+                None,
+            )
+            checked += 1
+            if subj_uuid and obj_uuid:
+                newly_bound += 1
+
+        if newly_bound:
+            logger.info(
+                "Retroactive binding complete",
+                entity=entity_name,
+                checked=checked,
+                newly_bound=newly_bound,
+            )
+        return {"checked": checked, "newly_bound": newly_bound}
+
+    async def get_user_facts_grouped(
+        self,
+        user_id: str,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """
+        Get user facts grouped by category with summary stats.
+
+        Args:
+            user_id: User ID
+            limit: Maximum facts to return
+
+        Returns:
+            Dict with 'facts_by_category' and 'summary'
+        """
+        result = await self._conn.execute_query(
+            queries.GET_USER_FACTS_WITH_BINDING,
+            {"user_id": user_id, "limit": limit},
+        )
+
+        by_category: dict[str, list[dict[str, Any]]] = {}
+        total = 0
+        bound_count = 0
+        unbound_count = 0
+        by_source: dict[str, int] = {}
+
+        for row in result:
+            f = row["f"]
+            fact_dict = {
+                "uuid": f["uuid"],
+                "subject": f["subject"],
+                "predicate": f["predicate"],
+                "object": f["object"],
+                "confidence": f.get("confidence", 1.0),
+                "source": f.get("source", "unknown"),
+                "category": f.get("category", "associative"),
+                "is_custom_predicate": f.get("is_custom_predicate", False),
+                "bound": f.get("bound", False),
+                "subject_entity": row.get("subject_entity_name"),
+                "object_entity": row.get("object_entity_name"),
+                "created_at": str(f.get("created_at", "")),
+            }
+
+            cat = fact_dict["category"]
+            by_category.setdefault(cat, []).append(fact_dict)
+
+            total += 1
+            if fact_dict["bound"]:
+                bound_count += 1
+            else:
+                unbound_count += 1
+            src = fact_dict["source"]
+            by_source[src] = by_source.get(src, 0) + 1
+
+        return {
+            "facts_by_category": by_category,
+            "summary": {
+                "total_facts": total,
+                "bound": bound_count,
+                "unbound": unbound_count,
+                "by_source": by_source,
+            },
+        }
+
+    async def _try_bind_fact(
+        self,
+        fact_uuid: str,
+        subject: str,
+        obj: str,
+        predicate: str,
+        category: str,
+        confidence: float,
+        source: str,
+        user_id: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Attempt to bind a fact to Entity nodes.
+
+        If both subject and object match existing Entity nodes, creates
+        a RELATED_TO relationship edge between them and marks the fact
+        as bound.
+
+        Args:
+            fact_uuid: UUID of the fact to bind
+            subject: Subject string to match against Entity names
+            obj: Object string to match against Entity names
+            predicate: The fact's predicate
+            category: The fact's category
+            confidence: The fact's confidence
+            source: The fact's source
+            user_id: Optional user ID for the relationship
+
+        Returns:
+            (subject_entity_uuid, object_entity_uuid) -- either can be None
+        """
+        subj_uuid = None
+        obj_uuid = None
+
+        # Try to bind subject
+        result = await self._conn.execute_write(
+            queries.BIND_FACT_TO_SUBJECT_ENTITY,
+            {"fact_uuid": fact_uuid, "subject": subject},
+        )
+        if result:
+            subj_uuid = result[0]["entity_uuid"]
+
+        # Try to bind object
+        result = await self._conn.execute_write(
+            queries.BIND_FACT_TO_OBJECT_ENTITY,
+            {"fact_uuid": fact_uuid, "object": obj},
+        )
+        if result:
+            obj_uuid = result[0]["entity_uuid"]
+
+        # If both bound, create typed entity relationship and mark fact
+        if subj_uuid and obj_uuid:
+            await self._conn.execute_write(
+                queries.CREATE_ENTITY_RELATIONSHIP_FROM_FACT,
+                {
+                    "source_uuid": subj_uuid,
+                    "target_uuid": obj_uuid,
+                    "predicate": predicate,
+                    "fact_uuid": fact_uuid,
+                    "category": category,
+                    "source": source,
+                    "user_id": user_id or "",
+                    "confidence": confidence,
+                },
+            )
+
+            await self._conn.execute_write(
+                queries.MARK_FACT_BOUND,
+                {
+                    "uuid": fact_uuid,
+                    "subject_entity_uuid": subj_uuid,
+                    "object_entity_uuid": obj_uuid,
+                },
+            )
+
+        return subj_uuid, obj_uuid
 
     # =========================================================================
     # User Context Operations
@@ -735,6 +1209,276 @@ class GraphRepository:
         return [r["a"] for r in result]
 
     # =========================================================================
+    # Namespace Operations
+    # =========================================================================
+
+    async def create_namespace(
+        self,
+        code: str,
+        name: str,
+        description: Optional[str] = None,
+    ) -> StoredNamespace:
+        """
+        Create a namespace, auto-creating parent namespaces if needed.
+
+        Hierarchical namespaces use colon separators (e.g., "SE:aerospace:propulsion").
+        Parent namespaces are created automatically if they don't exist.
+
+        Args:
+            code: Unique namespace code (e.g., "SE", "SE:aerospace")
+            name: Human-readable name
+            description: Optional description
+
+        Returns:
+            The created namespace
+        """
+        # Parse hierarchy from code
+        parts = code.split(":")
+        parent_code = None
+
+        # Create parent namespaces if needed
+        for i in range(len(parts) - 1):
+            ancestor_code = ":".join(parts[: i + 1])
+            existing = await self.get_namespace(ancestor_code)
+            if not existing:
+                # Create parent with generated name
+                await self._conn.execute_write(
+                    queries.CREATE_NAMESPACE,
+                    {
+                        "code": ancestor_code,
+                        "name": parts[i].upper(),
+                        "description": None,
+                        "parent_code": parent_code,
+                    },
+                )
+                logger.debug("Auto-created parent namespace", code=ancestor_code)
+            parent_code = ancestor_code
+
+        # Create the actual namespace
+        result = await self._conn.execute_write(
+            queries.CREATE_NAMESPACE,
+            {
+                "code": code,
+                "name": name,
+                "description": description,
+                "parent_code": parent_code,
+            },
+        )
+
+        ns_data = result[0]["n"] if result else {}
+        logger.info("Created namespace", code=code, parent=parent_code)
+
+        return StoredNamespace(
+            uuid=ns_data.get("uuid", ""),
+            code=code,
+            name=name,
+            description=description,
+            is_root=parent_code is None,
+            created_at=ns_data.get("created_at", datetime.utcnow()),
+        )
+
+    async def get_namespace(self, code: str) -> Optional[StoredNamespace]:
+        """
+        Get a namespace by code.
+
+        Args:
+            code: Namespace code (e.g., "SE:aerospace")
+
+        Returns:
+            Namespace if found, None otherwise
+        """
+        result = await self._conn.execute_query(
+            queries.FIND_NAMESPACE_BY_CODE,
+            {"code": code},
+        )
+
+        if not result:
+            return None
+
+        return self._parse_namespace(result[0]["n"])
+
+    async def list_namespaces(
+        self,
+        parent_code: Optional[str] = None,
+        include_descendants: bool = False,
+    ) -> list[StoredNamespace]:
+        """
+        List namespaces.
+
+        Args:
+            parent_code: List children of this namespace (None for root namespaces)
+            include_descendants: If True, include entire subtree
+
+        Returns:
+            List of namespaces
+        """
+        if parent_code is None:
+            # List root namespaces
+            result = await self._conn.execute_query(queries.LIST_ROOT_NAMESPACES)
+        elif include_descendants:
+            # List entire subtree
+            result = await self._conn.execute_query(
+                queries.LIST_NAMESPACE_DESCENDANTS,
+                {"code": parent_code},
+            )
+        else:
+            # List direct children only
+            result = await self._conn.execute_query(
+                queries.LIST_NAMESPACE_CHILDREN,
+                {"parent_code": parent_code},
+            )
+
+        return [self._parse_namespace(r["n"]) for r in result]
+
+    async def delete_namespace(
+        self,
+        code: str,
+        cascade: bool = False,
+    ) -> bool:
+        """
+        Delete a namespace.
+
+        Args:
+            code: Namespace code
+            cascade: If True, also delete child namespaces
+
+        Returns:
+            True if deleted
+        """
+        if cascade:
+            await self._conn.execute_write(
+                queries.DELETE_NAMESPACE_CASCADE,
+                {"code": code},
+            )
+        else:
+            await self._conn.execute_write(
+                queries.DELETE_NAMESPACE,
+                {"code": code},
+            )
+
+        logger.info("Deleted namespace", code=code, cascade=cascade)
+        return True
+
+    async def assign_entity_to_namespace(
+        self,
+        entity_uuid: str,
+        namespace_code: str,
+        primary: bool = True,
+    ) -> None:
+        """
+        Assign an entity to a namespace.
+
+        Args:
+            entity_uuid: Entity UUID
+            namespace_code: Namespace code
+            primary: Whether this is the entity's primary namespace
+        """
+        await self._conn.execute_write(
+            queries.ASSIGN_ENTITY_TO_NAMESPACE,
+            {
+                "entity_uuid": entity_uuid,
+                "namespace_code": namespace_code,
+                "primary": primary,
+            },
+        )
+        logger.debug(
+            "Assigned entity to namespace",
+            entity_uuid=entity_uuid,
+            namespace=namespace_code,
+            primary=primary,
+        )
+
+    async def remove_entity_from_namespace(
+        self,
+        entity_uuid: str,
+        namespace_code: str,
+    ) -> None:
+        """
+        Remove an entity from a namespace.
+
+        Args:
+            entity_uuid: Entity UUID
+            namespace_code: Namespace code
+        """
+        await self._conn.execute_write(
+            queries.REMOVE_ENTITY_FROM_NAMESPACE,
+            {
+                "entity_uuid": entity_uuid,
+                "namespace_code": namespace_code,
+            },
+        )
+
+    async def get_entity_namespaces(self, entity_uuid: str) -> list[StoredNamespace]:
+        """
+        Get all namespaces an entity belongs to.
+
+        Args:
+            entity_uuid: Entity UUID
+
+        Returns:
+            List of namespaces (primary first)
+        """
+        result = await self._conn.execute_query(
+            queries.GET_ENTITY_NAMESPACES,
+            {"entity_uuid": entity_uuid},
+        )
+
+        return [self._parse_namespace(r["n"]) for r in result]
+
+    async def list_entities_in_namespace(
+        self,
+        namespace_code: str,
+        name_contains: Optional[str] = None,
+        hex_pattern: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[StoredEntity]:
+        """
+        List entities in a namespace (including descendants).
+
+        Args:
+            namespace_code: Namespace code
+            name_contains: Optional name filter
+            hex_pattern: Optional hex prefix filter
+            limit: Maximum results
+
+        Returns:
+            List of entities in the namespace subtree
+        """
+        if name_contains or hex_pattern:
+            result = await self._conn.execute_query(
+                queries.LIST_ENTITIES_IN_NAMESPACE_FILTERED,
+                {
+                    "namespace_code": namespace_code,
+                    "name_filter": name_contains,
+                    "hex_filter": hex_pattern.upper() if hex_pattern else None,
+                    "limit": limit,
+                },
+            )
+        else:
+            result = await self._conn.execute_query(
+                queries.LIST_ENTITIES_IN_NAMESPACE,
+                {"namespace_code": namespace_code, "limit": limit},
+            )
+
+        return [self._parse_entity(r["e"]) for r in result]
+
+    async def count_entities_in_namespace(self, namespace_code: str) -> int:
+        """
+        Count entities in a namespace (including descendants).
+
+        Args:
+            namespace_code: Namespace code
+
+        Returns:
+            Entity count
+        """
+        result = await self._conn.execute_query(
+            queries.COUNT_ENTITIES_IN_NAMESPACE,
+            {"namespace_code": namespace_code},
+        )
+        return result[0]["entity_count"] if result else 0
+
+    # =========================================================================
     # Statistics
     # =========================================================================
 
@@ -780,6 +1524,12 @@ class GraphRepository:
             confidence=data.get("confidence", 1.0),
             source=data.get("source", "unknown"),
             created_at=data.get("created_at", datetime.utcnow()),
+            category=data.get("category", "associative"),
+            is_custom_predicate=data.get("is_custom_predicate", False),
+            bound=data.get("bound", False),
+            subject_entity_uuid=data.get("subject_entity_uuid"),
+            object_entity_uuid=data.get("object_entity_uuid"),
+            updated_at=data.get("updated_at"),
         )
 
     def _parse_reasoning_trace(self, data: dict[str, Any]) -> StoredReasoningTrace:
@@ -791,6 +1541,18 @@ class GraphRepository:
             strategy=data["strategy"],
             confidence=data.get("confidence", 0.0),
             created_at=data.get("created_at", datetime.utcnow()),
+        )
+
+    def _parse_namespace(self, data: dict[str, Any]) -> StoredNamespace:
+        """Parse Neo4j node data into StoredNamespace."""
+        return StoredNamespace(
+            uuid=data.get("uuid", ""),
+            code=data["code"],
+            name=data["name"],
+            description=data.get("description"),
+            is_root=data.get("is_root", False),
+            created_at=data.get("created_at", datetime.utcnow()),
+            entity_count=data.get("entity_count", 0),
         )
 
     def _hex_to_binary(self, hex_code: str) -> str:

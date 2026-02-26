@@ -203,6 +203,7 @@ class ReasoningEngine:
                     "property": p.property_name,
                     "confidence": p.confidence,
                     "source": p.source_axiom_name,
+                    "reasoning": p.reasoning_trace,
                 }
                 for p in properties
             ],

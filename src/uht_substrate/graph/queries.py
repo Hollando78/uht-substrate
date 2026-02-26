@@ -5,9 +5,9 @@
 # =============================================================================
 
 UPSERT_ENTITY = """
-MERGE (e:Entity {uuid: $uuid})
+MERGE (e:Entity {name: $name})
 ON CREATE SET
-    e.name = $name,
+    e.uuid = $uuid,
     e.hex_code = $hex_code,
     e.binary_code = $binary_code,
     e.description = $description,
@@ -15,7 +15,6 @@ ON CREATE SET
     e.created_at = datetime(),
     e.updated_at = datetime()
 ON MATCH SET
-    e.name = $name,
     e.hex_code = $hex_code,
     e.binary_code = $binary_code,
     e.description = COALESCE($description, e.description),
@@ -94,16 +93,18 @@ MATCH (t:Trait {bit_position: $bit_position})
 MERGE (e)-[r:HAS_TRAIT]->(t)
 ON CREATE SET
     r.confidence = $confidence,
+    r.justification = $justification,
     r.evaluated_at = datetime()
 ON MATCH SET
     r.confidence = $confidence,
+    r.justification = $justification,
     r.evaluated_at = datetime()
 RETURN r
 """
 
 GET_ENTITY_TRAITS = """
 MATCH (e:Entity {uuid: $uuid})-[r:HAS_TRAIT]->(t:Trait)
-RETURN t, r.confidence as confidence
+RETURN t, r.confidence as confidence, r.justification as justification
 ORDER BY t.bit_position
 """
 
@@ -157,6 +158,15 @@ RETURN type(r) as rel_type,
 # Fact Queries
 # =============================================================================
 
+FIND_DUPLICATE_FACT = """
+MATCH (f:Fact)
+WHERE toLower(f.subject) = toLower($subject)
+  AND f.predicate = $predicate
+  AND toLower(f.object) = toLower($object)
+RETURN f
+LIMIT 1
+"""
+
 CREATE_FACT = """
 CREATE (f:Fact {
     uuid: $uuid,
@@ -165,9 +175,37 @@ CREATE (f:Fact {
     object: $object,
     confidence: $confidence,
     source: $source,
-    created_at: datetime()
+    category: $category,
+    is_custom_predicate: $is_custom_predicate,
+    bound: false,
+    created_at: datetime(),
+    updated_at: datetime()
 })
 RETURN f
+"""
+
+FIND_FACT_BY_UUID = """
+MATCH (f:Fact {uuid: $uuid})
+RETURN f
+"""
+
+UPDATE_FACT = """
+MATCH (f:Fact {uuid: $uuid})
+SET f.subject = COALESCE($subject, f.subject),
+    f.predicate = COALESCE($predicate, f.predicate),
+    f.object = COALESCE($object, f.object),
+    f.confidence = COALESCE($confidence, f.confidence),
+    f.category = COALESCE($category, f.category),
+    f.is_custom_predicate = COALESCE($is_custom_predicate, f.is_custom_predicate),
+    f.updated_at = datetime()
+RETURN f
+"""
+
+DELETE_FACT = """
+MATCH (f:Fact {uuid: $uuid})
+WITH f, f.uuid AS deleted_uuid
+DETACH DELETE f
+RETURN deleted_uuid
 """
 
 FIND_FACTS_BY_SUBJECT = """
@@ -186,6 +224,30 @@ ORDER BY f.created_at DESC
 LIMIT $limit
 """
 
+QUERY_FACTS = """
+MATCH (f:Fact)
+WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+  AND ($object IS NULL OR toLower(f.object) = toLower($object))
+  AND ($predicate IS NULL OR f.predicate = $predicate)
+  AND ($category IS NULL OR f.category = $category)
+  AND ($source IS NULL OR f.source = $source)
+RETURN f
+ORDER BY f.created_at DESC
+LIMIT $limit
+"""
+
+QUERY_USER_FACTS = """
+MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
+WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+  AND ($object IS NULL OR toLower(f.object) = toLower($object))
+  AND ($predicate IS NULL OR f.predicate = $predicate)
+  AND ($category IS NULL OR f.category = $category)
+  AND ($source IS NULL OR f.source = $source)
+RETURN f
+ORDER BY f.created_at DESC
+LIMIT $limit
+"""
+
 LINK_FACT_TO_USER = """
 MATCH (uc:UserContext {user_id: $user_id})
 MATCH (f:Fact {uuid: $fact_uuid})
@@ -198,6 +260,80 @@ MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
 RETURN f
 ORDER BY f.created_at DESC
 LIMIT $limit
+"""
+
+GET_USER_FACTS_WITH_BINDING = """
+MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
+OPTIONAL MATCH (f)-[:FACT_ABOUT]->(subj_entity:Entity)
+OPTIONAL MATCH (f)-[:FACT_REFERENCES]->(obj_entity:Entity)
+RETURN f,
+       subj_entity.name AS subject_entity_name,
+       obj_entity.name AS object_entity_name
+ORDER BY f.category, f.created_at DESC
+LIMIT $limit
+"""
+
+# --- Entity Binding Queries ---
+
+BIND_FACT_TO_SUBJECT_ENTITY = """
+MATCH (f:Fact {uuid: $fact_uuid})
+MATCH (e:Entity)
+WHERE toLower(e.name) = toLower($subject)
+MERGE (f)-[:FACT_ABOUT]->(e)
+RETURN e.uuid AS entity_uuid, e.name AS entity_name
+"""
+
+BIND_FACT_TO_OBJECT_ENTITY = """
+MATCH (f:Fact {uuid: $fact_uuid})
+MATCH (e:Entity)
+WHERE toLower(e.name) = toLower($object)
+MERGE (f)-[:FACT_REFERENCES]->(e)
+RETURN e.uuid AS entity_uuid, e.name AS entity_name
+"""
+
+MARK_FACT_BOUND = """
+MATCH (f:Fact {uuid: $uuid})
+SET f.bound = true,
+    f.subject_entity_uuid = $subject_entity_uuid,
+    f.object_entity_uuid = $object_entity_uuid,
+    f.updated_at = datetime()
+RETURN f
+"""
+
+FIND_UNBOUND_FACTS = """
+MATCH (f:Fact)
+WHERE f.bound = false OR f.bound IS NULL
+RETURN f
+ORDER BY f.created_at ASC
+LIMIT $limit
+"""
+
+FIND_UNBOUND_FACTS_FOR_ENTITY = """
+MATCH (f:Fact)
+WHERE (f.bound = false OR f.bound IS NULL)
+  AND (toLower(f.subject) = toLower($entity_name)
+       OR toLower(f.object) = toLower($entity_name))
+RETURN f
+ORDER BY f.created_at ASC
+"""
+
+CREATE_ENTITY_RELATIONSHIP_FROM_FACT = """
+MATCH (e1:Entity {uuid: $source_uuid})
+MATCH (e2:Entity {uuid: $target_uuid})
+MERGE (e1)-[r:RELATED_TO {predicate: $predicate}]->(e2)
+SET r.fact_uuid = $fact_uuid,
+    r.category = $category,
+    r.source = $source,
+    r.user_id = $user_id,
+    r.confidence = $confidence,
+    r.created_at = datetime()
+RETURN r
+"""
+
+DELETE_ENTITY_RELATIONSHIP_BY_FACT = """
+MATCH (e1:Entity)-[r:RELATED_TO {fact_uuid: $fact_uuid}]->(e2:Entity)
+DELETE r
+RETURN count(r) AS deleted_count
 """
 
 # =============================================================================
@@ -382,6 +518,120 @@ GET_ALL_ONTOLOGICAL_COMMITMENTS = """
 MATCH (oc:OntologicalCommitment)
 RETURN oc
 ORDER BY oc.category, oc.name
+"""
+
+# =============================================================================
+# Namespace Queries
+# =============================================================================
+
+CREATE_NAMESPACE = """
+MERGE (n:Namespace {code: $code})
+ON CREATE SET
+    n.uuid = randomUUID(),
+    n.name = $name,
+    n.description = $description,
+    n.created_at = datetime(),
+    n.is_root = CASE WHEN $parent_code IS NULL THEN true ELSE false END
+ON MATCH SET
+    n.name = $name,
+    n.description = COALESCE($description, n.description)
+WITH n
+OPTIONAL MATCH (parent:Namespace {code: $parent_code})
+FOREACH (_ IN CASE WHEN parent IS NOT NULL THEN [1] ELSE [] END |
+    MERGE (parent)-[:PARENT_OF]->(n)
+)
+RETURN n
+"""
+
+FIND_NAMESPACE_BY_CODE = """
+MATCH (n:Namespace {code: $code})
+RETURN n
+"""
+
+LIST_ROOT_NAMESPACES = """
+MATCH (n:Namespace)
+WHERE n.is_root = true OR NOT EXISTS { (:Namespace)-[:PARENT_OF]->(n) }
+RETURN n
+ORDER BY n.code
+"""
+
+LIST_NAMESPACE_CHILDREN = """
+MATCH (parent:Namespace {code: $parent_code})-[:PARENT_OF]->(n:Namespace)
+RETURN n
+ORDER BY n.code
+"""
+
+LIST_NAMESPACE_DESCENDANTS = """
+MATCH (root:Namespace {code: $code})
+MATCH (root)-[:PARENT_OF*0..]->(n:Namespace)
+RETURN n
+ORDER BY n.code
+"""
+
+GET_NAMESPACE_PATH = """
+MATCH (n:Namespace {code: $code})
+MATCH path = (root:Namespace)-[:PARENT_OF*0..]->(n)
+WHERE root.is_root = true OR NOT EXISTS { (:Namespace)-[:PARENT_OF]->(root) }
+RETURN [node in nodes(path) | node.code] AS path
+"""
+
+DELETE_NAMESPACE = """
+MATCH (n:Namespace {code: $code})
+DETACH DELETE n
+"""
+
+DELETE_NAMESPACE_CASCADE = """
+MATCH (root:Namespace {code: $code})
+OPTIONAL MATCH (root)-[:PARENT_OF*0..]->(descendant:Namespace)
+DETACH DELETE descendant
+DETACH DELETE root
+"""
+
+ASSIGN_ENTITY_TO_NAMESPACE = """
+MATCH (e:Entity {uuid: $entity_uuid})
+MATCH (n:Namespace {code: $namespace_code})
+MERGE (e)-[r:BELONGS_TO]->(n)
+SET r.primary = $primary,
+    r.assigned_at = datetime()
+RETURN r
+"""
+
+REMOVE_ENTITY_FROM_NAMESPACE = """
+MATCH (e:Entity {uuid: $entity_uuid})-[r:BELONGS_TO]->(n:Namespace {code: $namespace_code})
+DELETE r
+"""
+
+GET_ENTITY_NAMESPACES = """
+MATCH (e:Entity {uuid: $entity_uuid})-[r:BELONGS_TO]->(n:Namespace)
+RETURN n, r.primary as is_primary
+ORDER BY r.primary DESC, n.code
+"""
+
+LIST_ENTITIES_IN_NAMESPACE = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+RETURN DISTINCT e
+ORDER BY e.created_at DESC
+LIMIT $limit
+"""
+
+LIST_ENTITIES_IN_NAMESPACE_FILTERED = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+WHERE ($name_filter IS NULL OR toLower(e.name) CONTAINS toLower($name_filter))
+  AND ($hex_filter IS NULL OR e.hex_code STARTS WITH $hex_filter)
+RETURN DISTINCT e
+ORDER BY e.created_at DESC
+LIMIT $limit
+"""
+
+COUNT_ENTITIES_IN_NAMESPACE = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+RETURN count(DISTINCT e) as entity_count
 """
 
 # =============================================================================

@@ -13,7 +13,7 @@ from .config.logging import configure_logging, get_logger
 from .config.settings import get_settings
 from .graph.connection import Neo4jConnection
 from .graph.repository import GraphRepository
-from .priors.inference import PriorInferenceEngine
+from .priors.inference import TRAIT_NAMES, PriorInferenceEngine
 from .reasoning.engine import ReasoningEngine
 from .uht_client.client import UHTClient
 
@@ -78,6 +78,105 @@ async def combined_lifespan(app) -> AsyncIterator[None]:
     await _startup()
     yield
     await _shutdown()
+
+
+# =============================================================================
+# Helper: Store Factory entities in local graph
+# =============================================================================
+
+
+async def _store_factory_entities(
+    entities: list[Any],
+    source: str = "uht_factory",
+) -> int:
+    """
+    Store entities returned from Factory API in the local Neo4j graph.
+
+    This grows the local knowledge graph as the LLM explores concepts,
+    enabling faster lookups and relationship discovery.
+
+    Args:
+        entities: List of Entity, ClassificationResult, SemanticSearchResult,
+                  or SimilarityResult objects
+        source: Source tag for provenance
+
+    Returns:
+        Number of entities stored
+    """
+    if not ctx.graph:
+        return 0
+
+    from .uht_client.models import (
+        ClassificationResult,
+        Entity,
+        SemanticSearchResult,
+        SimilarityResult,
+    )
+
+    stored = 0
+    stored_names: list[str] = []
+    for e in entities:
+        try:
+            name: str | None = None
+            # Convert various result types to Entity-like for storage
+            if isinstance(e, (ClassificationResult, Entity)):
+                name = e.entity if isinstance(e, ClassificationResult) else e.name
+                await ctx.graph.upsert_entity(e, source=source)
+                stored += 1
+            elif isinstance(e, SemanticSearchResult):
+                name = e.name
+                # Create minimal Entity from search result
+                entity = Entity(
+                    uuid=e.uuid,
+                    name=e.name,
+                    hex_code=e.hex_code,
+                    description=e.description,
+                    created_at=__import__("datetime").datetime.utcnow(),
+                )
+                await ctx.graph.upsert_entity(entity, source=source)
+                stored += 1
+            elif isinstance(e, SimilarityResult):
+                name = e.name
+                # SimilarityResult has entity fields directly
+                entity = Entity(
+                    uuid=e.uuid,
+                    name=e.name,
+                    hex_code=e.hex_code,
+                    description=e.description,
+                    binary=e.binary,
+                    created_at=__import__("datetime").datetime.utcnow(),
+                )
+                await ctx.graph.upsert_entity(entity, source=source)
+                stored += 1
+            elif isinstance(e, dict) and "uuid" in e and "hex_code" in e:
+                name = e.get("name", "Unknown")
+                # Raw dict with entity data
+                entity = Entity(
+                    uuid=e["uuid"],
+                    name=name,
+                    hex_code=e.get("hex_code") or e.get("uht_code", "00000000"),
+                    description=e.get("description"),
+                    created_at=__import__("datetime").datetime.utcnow(),
+                )
+                await ctx.graph.upsert_entity(entity, source=source)
+                stored += 1
+            if name:
+                stored_names.append(name)
+        except Exception as ex:
+            logger.debug("Failed to store entity", error=str(ex))
+            continue
+
+    # Retroactively bind unbound facts referencing any newly stored entities
+    for name in stored_names:
+        try:
+            await ctx.graph.bind_pending_facts_for_entity(name)
+        except Exception:
+            pass  # Best-effort binding
+
+    if stored > 0:
+        logger.debug("Stored Factory entities in local graph", count=stored)
+
+    return stored
 
 
 # Initialize MCP server
@@ -158,11 +257,165 @@ A reasoning substrate grounded in the Universal Hex Taxonomy (UHT). Every entity
 # Classification Tools
 # =============================================================================
 
+# Keyword → trait bit mapping for property-to-trait inference.
+# Each keyword maps to one or more trait bit positions (1-32).
+KEYWORD_TRAIT_MAP: dict[str, list[int]] = {
+    # Physical layer (1-8)
+    "physical": [1], "tangible": [1], "material": [1, 7], "object": [1],
+    "manufactured": [2], "synthetic": [2], "human-made": [2], "artificial": [2],
+    "biological": [3], "living": [3], "organic": [3], "biomimetic": [3],
+    "powered": [4], "electric": [4], "energy": [4], "battery": [4],
+    "structural": [5], "load-bearing": [5], "support": [5],
+    "observable": [6], "visible": [6], "measurable": [6], "detectable": [6],
+    "medium": [7], "substance": [7], "fluid": [7],
+    "active": [8], "motion": [8], "dynamic": [8], "moving": [8],
+    # Functional layer (9-16)
+    "designed": [9], "intentional": [9], "purposeful": [9], "engineered": [9],
+    "output": [10], "effect": [10], "produces": [10], "emits": [10],
+    "signal": [11, 18], "process": [11], "logic": [11], "compute": [11], "information": [11, 18],
+    "transform": [12], "change": [12], "alter": [12], "modify": [12], "convert": [12],
+    "interactive": [13], "user": [13], "human-operated": [13], "interface": [13],
+    "integrated": [14], "system": [14], "component": [14], "subsystem": [14],
+    "autonomous": [15], "independent": [15], "self-governing": [15],
+    "essential": [16], "critical": [16], "vital": [16],
+    # Abstract layer (17-24)
+    "symbolic": [17], "represent": [17], "signify": [17], "denote": [17],
+    "meaning": [17], "belief": [17], "concept": [17], "idea": [17],
+    "communicate": [18], "inform": [18], "convey": [18], "express": [18],
+    "rule": [19], "governed": [19], "formal": [19], "protocol": [19],
+    "compositional": [20], "combine": [20], "modular": [20], "discrete": [20],
+    "conflicting": [20], "tension": [20], "contradiction": [20],
+    "normative": [21], "prescriptive": [21], "ought": [21], "should": [21],
+    "meta": [22], "self-referential": [22], "reflexive": [22],
+    "cognitive": [22, 17], "psychological": [22, 17], "mental": [22, 17],
+    "temporal": [23], "time": [23], "sequence": [23], "duration": [23],
+    "motivates": [8, 12], "drives": [8, 12], "causes": [10, 12],
+    "behavior": [8, 13], "behavioural": [8, 13], "behavioral": [8, 13],
+    "discomfort": [10, 12], "stress": [10, 12],
+    "digital": [24], "virtual": [24], "software": [24], "cyber": [24],
+    # Social layer (25-32)
+    "social": [25], "collective": [25], "communal": [25],
+    "cultural": [25, 31], "tradition": [31], "ceremonial": [31],
+    "psychology": [25, 17], "sociological": [25], "anthropological": [25],
+    "institutional": [26], "organizational": [26], "bureaucratic": [26],
+    "identity": [27], "personal": [27], "belonging": [27],
+    "regulated": [28], "legal": [28], "compliance": [28], "law": [28],
+    "economic": [29], "market": [29], "monetary": [29], "financial": [29],
+    "political": [30], "governance": [30], "power": [30], "policy": [30],
+    "ritual": [31], "ceremony": [31],
+    "ethical": [32], "moral": [32], "rights": [32], "justice": [32],
+}
+
+# Stop words to exclude from token matching
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below",
+    "between", "under", "over", "and", "but", "or", "nor", "not", "no",
+    "so", "yet", "both", "either", "neither", "each", "every", "all",
+    "any", "few", "more", "most", "other", "some", "such", "than",
+    "too", "very", "just", "that", "this", "these", "those", "it", "its",
+})
+
+
+def _tokenize(text: str) -> set[str]:
+    """Tokenize text into lowercase word set, excluding stop words."""
+    import re
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    return words - _STOP_WORDS
+
+
+async def _map_properties_to_traits(
+    properties: list[str],
+) -> list[dict[str, Any]]:
+    """Map natural language properties to candidate UHT trait bits.
+
+    Uses a two-pass strategy:
+    1. Direct keyword lookup from KEYWORD_TRAIT_MAP (high confidence)
+    2. Token overlap between property text and trait definitions (lower confidence)
+
+    Args:
+        properties: List of natural language property strings
+
+    Returns:
+        List of mappings, one per property, each with candidate traits
+    """
+    # Fetch trait definitions for token overlap matching
+    trait_defs: list[Any] = []
+    if ctx.uht:
+        try:
+            trait_defs = await ctx.uht.get_traits()
+        except Exception:
+            pass
+
+    # Build trait text corpus for token overlap
+    trait_texts: dict[int, set[str]] = {}
+    for td in trait_defs:
+        text = f"{td.name} {td.short_description} {td.expanded_definition}"
+        trait_texts[td.bit_position] = _tokenize(text)
+
+    results = []
+    for prop in properties:
+        prop_tokens = _tokenize(prop)
+        candidates: dict[int, dict[str, Any]] = {}
+
+        # Pass 1: Direct keyword matches (high confidence)
+        for token in prop_tokens:
+            if token in KEYWORD_TRAIT_MAP:
+                for bit in KEYWORD_TRAIT_MAP[token]:
+                    if bit not in candidates:
+                        candidates[bit] = {
+                            "bit": bit,
+                            "name": TRAIT_NAMES.get(bit, f"Bit {bit}"),
+                            "rationale": f"keyword match: '{token}'",
+                            "mapping_confidence": 0.85,
+                        }
+                    else:
+                        # Multiple keyword hits increase confidence
+                        c = candidates[bit]
+                        c["mapping_confidence"] = min(0.95, c["mapping_confidence"] + 0.1)
+                        c["rationale"] += f", '{token}'"
+
+        # Pass 2: Token overlap with trait definitions (lower confidence)
+        if prop_tokens and trait_texts:
+            for bit, trait_tokens in trait_texts.items():
+                if bit in candidates:
+                    continue  # Already matched via keyword
+                overlap = prop_tokens & trait_tokens
+                if overlap:
+                    jaccard = len(overlap) / len(prop_tokens | trait_tokens)
+                    if jaccard > 0.03:
+                        candidates[bit] = {
+                            "bit": bit,
+                            "name": TRAIT_NAMES.get(bit, f"Bit {bit}"),
+                            "rationale": f"definition overlap: {', '.join(sorted(overlap))}",
+                            "mapping_confidence": round(min(0.7, jaccard * 5), 2),
+                        }
+
+        # Sort by confidence descending
+        sorted_candidates = sorted(
+            candidates.values(),
+            key=lambda c: c["mapping_confidence"],
+            reverse=True,
+        )
+
+        results.append({
+            "property": prop,
+            "candidate_traits": sorted_candidates,
+        })
+
+    return results
+
 
 @mcp.tool()
 async def classify_entity(
     entity: str,
     context: str = "",
+    namespace: str = "",
+    force_refresh: bool = False,
+    use_semantic_priors: bool = False,
 ) -> dict[str, Any]:
     """
     Classify an entity using the Universal Hex Taxonomy (UHT).
@@ -178,34 +431,157 @@ async def classify_entity(
     - Get inferred properties from trait axioms
     - Build up a local knowledge graph for fast lookups
 
-    If the entity exists in the Factory corpus (16,000+ entities), returns cached
-    classification. Otherwise runs fresh classification (slower, uses GPT-4).
-
     Args:
         entity: The entity to classify (e.g., "hammer", "democracy", "virus")
-        context: Optional disambiguation context (e.g., "the programming language")
+        context: Optional context/description to guide classification
+                 (e.g., "a programming language" or "the boundary between two systems")
+        namespace: Optional namespace code (e.g., "SE", "SE:aerospace").
+                   If provided, entity is assigned to this namespace.
+                   If empty, assigned to "global" namespace.
+        force_refresh: Skip local cache and request fresh classification.
+                       Note: Factory corpus entities may still return cached results
+                       from the Factory API. For truly fresh classification of
+                       corpus entities, include distinctive context.
+        use_semantic_priors: Run semantic triangle decomposition first and use
+                            essential properties as classification priors. This
+                            enriches the context with ontological analysis before
+                            trait evaluation.
 
     Returns:
         hex_code: 8-char hex (e.g., "C6880008")
         properties: Inferred properties from trait axioms
-        confidence: Classification confidence
+        traits: Individual trait evaluations
     """
-    if not ctx.engine:
-        return {"error": "Engine not initialized"}
+    if not ctx.uht:
+        return {"error": "UHT client not initialized"}
 
-    result = await ctx.engine.reason(
-        query=f"What is {entity}?",
-        additional_context=context if context else None,
-    )
+    try:
+        # Semantic priors: run triangle decomposition and map to traits
+        semantic_priors: list[dict[str, Any]] | None = None
+        if use_semantic_priors:
+            try:
+                triangle = await ctx.uht.get_semantic_triangle(entity)
+                essential_props = triangle.thought.essential_properties
+                category = triangle.thought.category
 
-    return {
-        "entity": entity,
-        "hex_code": result.hex_codes.get(entity, "unknown"),
-        "answer": result.answer,
-        "confidence": result.confidence,
-        "properties": result.inferred_properties[:10],
-        "trace_id": result.trace_id,
-    }
+                if essential_props:
+                    mappings = await _map_properties_to_traits(essential_props)
+                    semantic_priors = []
+                    suggested_traits: list[str] = []
+
+                    for m in mappings:
+                        candidates = m["candidate_traits"]
+                        semantic_priors.append({
+                            "essential_property": m["property"],
+                            "candidate_traits": [c["bit"] for c in candidates],
+                            "trait_names": [c["name"] for c in candidates],
+                            "mapping_confidence": round(
+                                max((c["mapping_confidence"] for c in candidates), default=0.0),
+                                2,
+                            ),
+                        })
+                        suggested_traits.extend(c["name"] for c in candidates)
+
+                    # Build enhanced context
+                    props_str = "; ".join(essential_props)
+                    traits_str = ", ".join(sorted(set(suggested_traits)))
+                    prior_context = (
+                        f"Semantic analysis identifies these essential properties: {props_str}. "
+                        f"Category: {category}. "
+                        f"These suggest traits: {traits_str}."
+                    )
+                    context = f"{prior_context} {context}".strip() if context else prior_context
+            except Exception as e:
+                log.warning("Semantic priors failed, continuing without", error=str(e))
+        # Determine the entity name to send to Factory API
+        # When force_refresh + namespace, use "entity@namespace" format to bypass
+        # Factory's corpus cache for polysemous terms
+        classify_name = entity
+        if force_refresh and namespace:
+            classify_name = f"{entity}@{namespace}"
+            log.info(
+                "Using namespace-qualified name for fresh classification",
+                original=entity,
+                qualified=classify_name,
+            )
+
+        # Classify directly via UHT Factory API, passing context as description
+        # Namespace is used for cache key differentiation (same entity in different
+        # namespaces may need different classifications)
+        result = await ctx.uht.classify(
+            entity=classify_name,
+            context=context if context else None,
+            force_refresh=force_refresh,
+            namespace=namespace if namespace else None,
+        )
+
+        # Store in local graph for future lookups
+        # Use original entity name (not namespace-qualified name) for storage
+        if ctx.graph:
+            # Create a copy with the original entity name if we used qualified name
+            store_result = result
+            if classify_name != entity:
+                # Override the name for storage
+                from uht_substrate.uht_client.models import ClassificationResult
+                store_result = ClassificationResult(
+                    uuid=result.uuid,
+                    name=entity,  # Use original name
+                    hex_code=result.hex_code,
+                    binary=result.binary,
+                    traits=result.traits,
+                    created_at=result.created_at,
+                )
+            await ctx.graph.upsert_entity(
+                store_result,
+                source="uht_factory",
+                description=context or None,
+                namespace=namespace or None,
+            )
+
+            # Retroactively bind any unbound facts referencing this entity
+            await ctx.graph.bind_pending_facts_for_entity(entity)
+
+        # Get inferred properties from trait axioms
+        inferred_properties = []
+        if ctx.inference:
+            props = ctx.inference.infer_properties(result.hex_code, entity)
+            inferred_properties = [
+                {
+                    "property": p.property_name,
+                    "confidence": p.confidence,
+                    "source": p.source_axiom_name,
+                    "reasoning": p.reasoning_trace,
+                }
+                for p in props[:15]
+            ]
+
+        response = {
+            "entity": entity,
+            "context_used": context if context else None,
+            "namespace": namespace if namespace else "global",
+            "force_refresh": force_refresh,
+            "hex_code": result.hex_code,
+            "binary": result.binary,
+            "traits": [
+                {
+                    "bit": t.bit_position,
+                    "name": t.name,
+                    "present": t.present,
+                    "confidence": t.confidence,
+                    "justification": t.justification,
+                }
+                for t in result.traits
+            ],
+            "inferred_properties": inferred_properties,
+        }
+
+        if semantic_priors is not None:
+            response["semantic_priors"] = semantic_priors
+
+        return response
+    except Exception as e:
+        log.error("classify_entity failed", entity=entity, error=str(e))
+        return {"error": f"Classification failed: {str(e)}"}
 
 
 @mcp.tool()
@@ -268,16 +644,18 @@ async def find_similar_entities(
             limit=limit,
         )
 
+        # Store returned entities in local graph for future lookups
+        await _store_factory_entities(similar_results, source="uht_factory")
+
         return {
             "entity": entity,
             "hex_code": entity_data.hex_code,
             "similar_entities": [
                 {
-                    "name": r.entity.name,
-                    "hex_code": r.entity.hex_code,
+                    "name": r.name,
+                    "hex_code": r.hex_code,
                     "similarity_score": r.similarity_score,
-                    "hamming_distance": r.hamming_distance,
-                    "shared_traits": len(r.shared_traits),
+                    "shared_traits": r.shared_trait_count,
                 }
                 for r in similar_results
             ],
@@ -291,6 +669,7 @@ async def find_similar_entities(
 async def list_entities(
     hex_pattern: str = "",
     name_contains: str = "",
+    namespace: str = "",
     limit: int = 50,
     source: str = "both",
 ) -> dict[str, Any]:
@@ -300,6 +679,7 @@ async def list_entities(
     Args:
         hex_pattern: Filter by hex code pattern (e.g., "C688" for tools)
         name_contains: Filter by name substring (case-insensitive)
+        namespace: Filter by namespace (e.g., "SE", "SE:aerospace"). Includes descendants.
         limit: Maximum number of results (1-100)
         source: "local" (Neo4j only), "factory" (UHT API only), or "both"
 
@@ -314,6 +694,7 @@ async def list_entities(
         local_entities = await ctx.graph.list_entities(
             name_contains=name_contains if name_contains else None,
             hex_pattern=hex_pattern if hex_pattern else None,
+            namespace=namespace if namespace else None,
             limit=limit,
         )
         for e in local_entities:
@@ -332,6 +713,10 @@ async def list_entities(
                 uht_pattern=hex_pattern if hex_pattern else None,
                 limit=limit,
             )
+
+            # Store Factory entities in local graph for future lookups
+            await _store_factory_entities(factory_entities, source="uht_factory")
+
             for e in factory_entities:
                 # Avoid duplicates from local
                 if not any(r["name"] == e.name for r in results):
@@ -351,6 +736,7 @@ async def list_entities(
         "filters": {
             "hex_pattern": hex_pattern or None,
             "name_contains": name_contains or None,
+            "namespace": namespace or None,
             "source": source,
         },
     }
@@ -358,12 +744,43 @@ async def list_entities(
 
 @mcp.tool()
 async def search_by_traits(
+    # Physical layer (bits 1-8)
     physical_object: bool | None = None,
     synthetic: bool | None = None,
     biological: bool | None = None,
+    powered: bool | None = None,
     structural: bool | None = None,
     observable: bool | None = None,
-    consumable: bool | None = None,
+    physical_medium: bool | None = None,
+    active: bool | None = None,
+    # Functional layer (bits 9-16)
+    intentionally_designed: bool | None = None,
+    outputs_effect: bool | None = None,
+    processes_signals: bool | None = None,
+    state_transforming: bool | None = None,
+    human_interactive: bool | None = None,
+    system_integrated: bool | None = None,
+    functionally_autonomous: bool | None = None,
+    system_essential: bool | None = None,
+    # Abstract layer (bits 17-24)
+    symbolic: bool | None = None,
+    signalling: bool | None = None,
+    rule_governed: bool | None = None,
+    compositional: bool | None = None,
+    normative: bool | None = None,
+    meta: bool | None = None,
+    temporal: bool | None = None,
+    digital_virtual: bool | None = None,
+    # Social layer (bits 25-32)
+    social_construct: bool | None = None,
+    institutionally_defined: bool | None = None,
+    identity_linked: bool | None = None,
+    regulated: bool | None = None,
+    economically_significant: bool | None = None,
+    politicised: bool | None = None,
+    ritualised: bool | None = None,
+    ethically_significant: bool | None = None,
+    # Limit
     limit: int = 20,
 ) -> dict[str, Any]:
     """
@@ -372,16 +789,48 @@ async def search_by_traits(
     Use this to find entities with particular combinations of traits.
     Pass True to require a trait, False to exclude it, or omit to ignore.
 
-    Example: Find non-living, non-edible, human-made objects:
-      synthetic=True, biological=False, consumable=False
+    Example: Find biological, non-synthetic entities:
+      biological=True, synthetic=False
+
+    Example: Find symbolic, rule-governed abstractions:
+      symbolic=True, rule_governed=True, physical_object=False
+
+    Example: Find powered, human-interactive devices:
+      powered=True, human_interactive=True
 
     Args:
         physical_object: Bit 1 - Has physical form/mass
         synthetic: Bit 2 - Human-made/manufactured
-        biological: Bit 3 - Has biological origin
+        biological: Bit 3 - Has biological origin/structure
+        powered: Bit 4 - Requires energy input
         structural: Bit 5 - Load-bearing/structural
         observable: Bit 6 - Can be directly observed
-        consumable: Bit 12 - Can be consumed/eaten
+        physical_medium: Bit 7 - Transmits/contains physical substance
+        active: Bit 8 - Exhibits autonomous motion/change
+        intentionally_designed: Bit 9 - Created with purpose
+        outputs_effect: Bit 10 - Produces observable effects
+        processes_signals: Bit 11 - Processes information/signals
+        state_transforming: Bit 12 - Changes state of other entities
+        human_interactive: Bit 13 - Designed for human use
+        system_integrated: Bit 14 - Part of larger system
+        functionally_autonomous: Bit 15 - Operates independently
+        system_essential: Bit 16 - Critical to system function
+        symbolic: Bit 17 - Represents or signifies something
+        signalling: Bit 18 - Conveys information
+        rule_governed: Bit 19 - Follows explicit rules
+        compositional: Bit 20 - Made of discrete combinable parts
+        normative: Bit 21 - Prescribes how things should be
+        meta: Bit 22 - About other concepts/systems
+        temporal: Bit 23 - Inherently time-related
+        digital_virtual: Bit 24 - Exists in digital/virtual form
+        social_construct: Bit 25 - Exists through collective agreement
+        institutionally_defined: Bit 26 - Defined by institutions
+        identity_linked: Bit 27 - Tied to personal/group identity
+        regulated: Bit 28 - Subject to formal regulation
+        economically_significant: Bit 29 - Has economic value/role
+        politicised: Bit 30 - Subject to political contestation
+        ritualised: Bit 31 - Involves ritualistic practices
+        ethically_significant: Bit 32 - Raises ethical considerations
         limit: Maximum results (1-100)
 
     Returns:
@@ -391,16 +840,41 @@ async def search_by_traits(
         return {"error": "UHT client not initialized"}
 
     # Build 32-char pattern with X for wildcards
-    # Bit positions: 1=physical, 2=synthetic, 3=biological, 5=structural, 6=observable, 12=consumable
     pattern = ["X"] * 32
 
     trait_map = {
         1: physical_object,
         2: synthetic,
         3: biological,
+        4: powered,
         5: structural,
         6: observable,
-        12: consumable,
+        7: physical_medium,
+        8: active,
+        9: intentionally_designed,
+        10: outputs_effect,
+        11: processes_signals,
+        12: state_transforming,
+        13: human_interactive,
+        14: system_integrated,
+        15: functionally_autonomous,
+        16: system_essential,
+        17: symbolic,
+        18: signalling,
+        19: rule_governed,
+        20: compositional,
+        21: normative,
+        22: meta,
+        23: temporal,
+        24: digital_virtual,
+        25: social_construct,
+        26: institutionally_defined,
+        27: identity_linked,
+        28: regulated,
+        29: economically_significant,
+        30: politicised,
+        31: ritualised,
+        32: ethically_significant,
     }
 
     for bit_pos, value in trait_map.items():
@@ -415,6 +889,10 @@ async def search_by_traits(
 
     try:
         entities = await ctx.uht.search_by_pattern(pattern_str, limit=min(limit, 100))
+
+        # Store returned entities in local graph for future lookups
+        await _store_factory_entities(entities, source="uht_factory")
+
         return {
             "pattern": pattern_str,
             "count": len(entities),
@@ -468,54 +946,156 @@ async def delete_entity(
 
 
 # =============================================================================
-# Reasoning Tools
+# Namespace Tools
 # =============================================================================
 
 
 @mcp.tool()
-async def reason_about(
-    query: str,
-    context: str = "",
+async def create_namespace(
+    code: str,
+    name: str,
+    description: str = "",
 ) -> dict[str, Any]:
     """
-    [DEPRECATED] General-purpose reasoning about entities.
+    Create a new namespace for organizing entities.
 
-    This tool is deprecated. Instead, use the primitive tools directly:
-    - "What is X?" → classify_entity(X)
-    - "Compare X and Y" → compare_entities(X, Y)
-    - "What properties does X have?" → infer_properties(X)
-
-    See the server instructions for reasoning patterns that compose these tools.
+    Hierarchical namespaces use colon separators (e.g., "SE:aerospace:propulsion").
+    Parent namespaces are automatically created if they don't exist.
 
     Args:
-        query: Question to reason about
-        context: Optional additional context
+        code: Unique namespace code (e.g., "SE", "SE:aerospace", "BIO:genomics")
+        name: Human-readable name
+        description: Optional description
 
     Returns:
-        Reasoned answer with confidence and supporting evidence
+        Created namespace details
     """
-    if not ctx.engine:
-        return {"error": "Engine not initialized"}
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
 
-    result = await ctx.engine.reason(
-        query=query,
-        additional_context=context if context else None,
-    )
+    try:
+        ns = await ctx.graph.create_namespace(
+            code=code,
+            name=name,
+            description=description if description else None,
+        )
 
-    return {
-        "query": query,
-        "answer": result.answer,
-        "confidence": result.confidence,
-        "sources": result.sources,
-        "inferred_properties": result.inferred_properties[:10],
-        "trace_id": result.trace_id,
-    }
+        return {
+            "code": ns.code,
+            "name": ns.name,
+            "description": ns.description,
+            "is_root": ns.is_root,
+            "created_at": str(ns.created_at),
+        }
+    except Exception as e:
+        log.error("create_namespace failed", code=code, error=str(e))
+        return {"error": f"Failed to create namespace: {str(e)}"}
+
+
+@mcp.tool()
+async def list_namespaces(
+    parent: str = "",
+    include_descendants: bool = False,
+) -> dict[str, Any]:
+    """
+    List namespaces in the knowledge graph.
+
+    Args:
+        parent: List children of this namespace (empty for root namespaces)
+        include_descendants: Include entire subtree under parent
+
+    Returns:
+        List of namespaces with their hierarchy information
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    try:
+        namespaces = await ctx.graph.list_namespaces(
+            parent_code=parent if parent else None,
+            include_descendants=include_descendants,
+        )
+
+        results = []
+        for ns in namespaces:
+            entity_count = await ctx.graph.count_entities_in_namespace(ns.code)
+            results.append({
+                "code": ns.code,
+                "name": ns.name,
+                "description": ns.description,
+                "is_root": ns.is_root,
+                "entity_count": entity_count,
+            })
+
+        return {
+            "count": len(results),
+            "parent": parent if parent else None,
+            "namespaces": results,
+        }
+    except Exception as e:
+        log.error("list_namespaces failed", error=str(e))
+        return {"error": f"Failed to list namespaces: {str(e)}"}
+
+
+@mcp.tool()
+async def assign_to_namespace(
+    entity_name: str,
+    namespace: str,
+    primary: bool = True,
+) -> dict[str, Any]:
+    """
+    Assign an existing entity to a namespace.
+
+    Args:
+        entity_name: Name of the entity to assign
+        namespace: Namespace code to assign the entity to
+        primary: Whether this is the entity's primary namespace
+
+    Returns:
+        Confirmation with entity and namespace details
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    try:
+        # Find the entity
+        entity = await ctx.graph.find_entity_by_name(entity_name)
+        if not entity:
+            return {"error": f"Entity '{entity_name}' not found in local graph"}
+
+        # Verify namespace exists
+        ns = await ctx.graph.get_namespace(namespace)
+        if not ns:
+            return {"error": f"Namespace '{namespace}' not found. Create it first."}
+
+        # Assign entity to namespace
+        await ctx.graph.assign_entity_to_namespace(
+            entity_uuid=entity.uuid,
+            namespace_code=namespace,
+            primary=primary,
+        )
+
+        return {
+            "entity": entity_name,
+            "namespace": namespace,
+            "primary": primary,
+            "success": True,
+        }
+    except Exception as e:
+        log.error("assign_to_namespace failed", error=str(e))
+        return {"error": f"Failed to assign entity: {str(e)}"}
+
+
+# =============================================================================
+# Reasoning Tools
+# =============================================================================
 
 
 @mcp.tool()
 async def compare_entities(
     entity_a: str,
     entity_b: str,
+    store_similarity: bool = False,
 ) -> dict[str, Any]:
     """
     Compare two entities using UHT trait analysis.
@@ -537,6 +1117,8 @@ async def compare_entities(
     Args:
         entity_a: First entity (will be classified if not already known)
         entity_b: Second entity (will be classified if not already known)
+        store_similarity: If True and Jaccard >= 0.70, auto-store a computed
+            SIMILAR_TO fact and create a SIMILAR_TO Neo4j edge
 
     Returns:
         hex_codes: {entity_a: "...", entity_b: "..."}
@@ -553,6 +1135,7 @@ async def compare_entities(
     # Get detailed similarity metrics if we have both hex codes
     similarity_metrics = {}
     trait_diff = {}
+    analysis = None
     if ctx.inference and len(result.hex_codes) >= 2:
         hex_a = result.hex_codes.get(entity_a)
         hex_b = result.hex_codes.get(entity_b)
@@ -566,12 +1149,73 @@ async def compare_entities(
                 "traits_a_only_count": len(analysis.traits_a_only),
                 "traits_b_only_count": len(analysis.traits_b_only),
             }
-            # Include actual trait names for detailed analysis
+
+            # Build justification lookups from classifications (will hit cache)
+            justifications_a: dict[int, str | None] = {}
+            justifications_b: dict[int, str | None] = {}
+            if ctx.uht:
+                try:
+                    class_a = await ctx.uht.classify(entity_a)
+                    class_b = await ctx.uht.classify(entity_b)
+                    justifications_a = {t.bit_position: t.justification for t in class_a.traits}
+                    justifications_b = {t.bit_position: t.justification for t in class_b.traits}
+                except Exception:
+                    pass  # Graceful fallback — justifications just won't be included
+
+            # Include trait names with justifications for detailed analysis
             trait_diff = {
-                "shared_traits": analysis.get_shared_trait_names(),
-                "traits_a_only": analysis.get_traits_a_only_names(),
-                "traits_b_only": analysis.get_traits_b_only_names(),
+                "shared_traits": [
+                    {
+                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                        "justification_a": justifications_a.get(b),
+                        "justification_b": justifications_b.get(b),
+                    }
+                    for b in analysis.shared_traits
+                ],
+                "traits_a_only": [
+                    {
+                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                        "justification": justifications_a.get(b),
+                    }
+                    for b in analysis.traits_a_only
+                ],
+                "traits_b_only": [
+                    {
+                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                        "justification": justifications_b.get(b),
+                    }
+                    for b in analysis.traits_b_only
+                ],
             }
+
+    # Auto-store SIMILAR_TO computed fact if requested and similarity is high
+    stored_fact_id = None
+    if store_similarity and ctx.graph and analysis and similarity_metrics:
+        jaccard = similarity_metrics.get("jaccard_similarity", 0)
+        if jaccard >= 0.70:
+            try:
+                fact = await ctx.graph.store_fact(
+                    subject=entity_a,
+                    predicate="SIMILAR_TO",
+                    obj=entity_b,
+                    confidence=jaccard,
+                    source="computed",
+                    user_id="default",
+                )
+                stored_fact_id = fact.uuid
+
+                # Also create SIMILAR_TO edge if both entities exist in graph
+                entity_a_stored = await ctx.graph.find_entity_by_name(entity_a)
+                entity_b_stored = await ctx.graph.find_entity_by_name(entity_b)
+                if entity_a_stored and entity_b_stored:
+                    await ctx.graph.create_similar_to_relationship(
+                        source_uuid=entity_a_stored.uuid,
+                        target_uuid=entity_b_stored.uuid,
+                        similarity_score=jaccard,
+                        shared_traits=sorted(analysis.shared_traits),
+                    )
+            except Exception as e:
+                logger.warning("Failed to store similarity fact", error=str(e))
 
     return {
         "entity_a": entity_a,
@@ -582,6 +1226,7 @@ async def compare_entities(
         "comparison": result.answer,
         "confidence": result.confidence,
         "trace_id": result.trace_id,
+        "stored_fact_id": stored_fact_id,
     }
 
 
@@ -589,6 +1234,7 @@ async def compare_entities(
 async def batch_compare(
     entity: str,
     candidates: list[str],
+    store_similarity: bool = False,
 ) -> dict[str, Any]:
     """
     Compare one entity against multiple candidates, returning ranked results.
@@ -603,6 +1249,8 @@ async def batch_compare(
     Args:
         entity: The entity to compare against all candidates
         candidates: List of candidate entities to compare with (max 20)
+        store_similarity: If True, auto-store computed SIMILAR_TO facts for
+            candidates with Jaccard >= 0.70
 
     Returns:
         Ranked list of comparisons sorted by Jaccard similarity
@@ -630,6 +1278,9 @@ async def batch_compare(
         *[classify_candidate(c) for c in candidates]
     )
 
+    # Build justification lookup for the main entity
+    main_justifications = {t.bit_position: t.justification for t in main_class.traits}
+
     # Compare and build results
     comparisons = []
     for name, classification in candidate_results:
@@ -643,26 +1294,88 @@ async def batch_compare(
             name,
         )
 
+        cand_justifications = {t.bit_position: t.justification for t in classification.traits}
+
         comparisons.append({
             "candidate": name,
             "hex_code": classification.hex_code,
             "jaccard_similarity": round(analysis.jaccard_similarity, 3),
             "hamming_distance": analysis.hamming_distance,
-            "shared_traits": analysis.get_shared_trait_names(),
-            "traits_entity_only": analysis.get_traits_a_only_names(),
-            "traits_candidate_only": analysis.get_traits_b_only_names(),
+            "shared_traits": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification_entity": main_justifications.get(b),
+                    "justification_candidate": cand_justifications.get(b),
+                }
+                for b in analysis.shared_traits
+            ],
+            "traits_entity_only": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification": main_justifications.get(b),
+                }
+                for b in analysis.traits_a_only
+            ],
+            "traits_candidate_only": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification": cand_justifications.get(b),
+                }
+                for b in analysis.traits_b_only
+            ],
         })
 
     # Sort by Jaccard (highest first)
     comparisons.sort(key=lambda x: x["jaccard_similarity"], reverse=True)
 
-    return {
+    # Auto-store SIMILAR_TO computed facts for high-similarity candidates
+    stored_fact_ids: list[dict[str, str]] = []
+    if store_similarity and ctx.graph:
+        for comp in comparisons:
+            jaccard = comp["jaccard_similarity"]
+            if jaccard < 0.70:
+                break  # Sorted desc, no more above threshold
+            try:
+                fact = await ctx.graph.store_fact(
+                    subject=entity,
+                    predicate="SIMILAR_TO",
+                    obj=comp["candidate"],
+                    confidence=jaccard,
+                    source="computed",
+                    user_id="default",
+                )
+                stored_fact_ids.append({
+                    "candidate": comp["candidate"],
+                    "fact_id": fact.uuid,
+                })
+
+                entity_a_stored = await ctx.graph.find_entity_by_name(entity)
+                entity_b_stored = await ctx.graph.find_entity_by_name(comp["candidate"])
+                if entity_a_stored and entity_b_stored:
+                    shared_bits = [
+                        t.bit_position
+                        for t in main_class.traits
+                        if t.present
+                    ]
+                    await ctx.graph.create_similar_to_relationship(
+                        source_uuid=entity_a_stored.uuid,
+                        target_uuid=entity_b_stored.uuid,
+                        similarity_score=jaccard,
+                        shared_traits=shared_bits,
+                    )
+            except Exception as e:
+                logger.warning("Failed to store batch similarity fact", error=str(e))
+
+    result_dict: dict[str, Any] = {
         "entity": entity,
         "hex_code": main_class.hex_code,
         "comparisons": comparisons,
         "best_match": comparisons[0]["candidate"] if comparisons else None,
         "best_jaccard": comparisons[0]["jaccard_similarity"] if comparisons else None,
     }
+    if stored_fact_ids:
+        result_dict["stored_similarity_facts"] = stored_fact_ids
+    return result_dict
 
 
 @mcp.tool()
@@ -763,6 +1476,14 @@ async def explore_neighborhood(
             k=limit,
             min_similarity=min_similarity,
         )
+
+        # Store neighbor entities in local graph for future lookups
+        neighbor_dicts = [
+            {"uuid": n.uuid, "name": n.name, "hex_code": n.hex_code}
+            for n in neighborhood.nodes
+            if n.hex_code  # Only store nodes with hex codes
+        ]
+        await _store_factory_entities(neighbor_dicts, source="uht_factory")
 
         return {
             "entity": entity,
@@ -873,6 +1594,55 @@ async def get_semantic_triangle(
     }
 
 
+@mcp.tool()
+async def map_properties_to_traits(
+    properties: list[str],
+) -> dict[str, Any]:
+    """Map natural language properties to candidate UHT trait bits.
+
+    Takes a list of natural language property strings (from the semantic triangle,
+    a domain expert, or any other source) and returns candidate trait mappings.
+
+    This is the most composable approach — the client decides what to do with
+    the mappings. They can feed them into classify_entity context, use them
+    for audit, or let a domain expert override.
+
+    Typical workflow:
+    1. get_semantic_triangle("cognitive dissonance") → essential_properties
+    2. map_properties_to_traits(essential_properties) → candidate traits
+    3. classify_entity("cognitive dissonance", context + mapped priors)
+
+    Args:
+        properties: List of natural language property strings
+                    (e.g., ["involves conflicting beliefs", "causes discomfort"])
+
+    Returns:
+        Per-property mappings with candidate trait bits, names, and rationale
+    """
+    mappings = await _map_properties_to_traits(properties)
+
+    # Collect all unique suggested bits
+    all_bits: set[int] = set()
+    for m in mappings:
+        for c in m["candidate_traits"]:
+            all_bits.add(c["bit"])
+
+    # Build suggested hex code from all mapped bits
+    binary = ["0"] * 32
+    for bit in all_bits:
+        binary[bit - 1] = "1"
+    binary_str = "".join(binary)
+    suggested_hex = format(int(binary_str, 2), "08X")
+
+    return {
+        "properties": properties,
+        "mappings": mappings,
+        "all_candidate_bits": sorted(all_bits),
+        "all_candidate_trait_names": [TRAIT_NAMES.get(b, f"Bit {b}") for b in sorted(all_bits)],
+        "suggested_hex_code": suggested_hex,
+    }
+
+
 # =============================================================================
 # Context Management Tools
 # =============================================================================
@@ -903,22 +1673,198 @@ async def store_fact(
     if not ctx.graph:
         return {"error": "Graph not initialized"}
 
-    fact = await ctx.graph.store_fact(
-        subject=subject,
-        predicate=predicate,
-        obj=object_value,
-        confidence=1.0,
-        source="user",
-        user_id=user_id,
+    from .graph.schema import PredicateTaxonomy
+
+    if not PredicateTaxonomy.is_user_settable(predicate):
+        return {
+            "error": f"Predicate '{predicate}' is in the 'computed' category "
+            "and cannot be set directly. Use a different predicate."
+        }
+
+    try:
+        fact = await ctx.graph.store_fact(
+            subject=subject,
+            predicate=predicate,
+            obj=object_value,
+            confidence=1.0,
+            source="asserted",
+            user_id=user_id,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
+    is_duplicate = getattr(fact, "_is_duplicate", False)
+    return {
+        "fact_id": fact.uuid,
+        "subject": fact.subject,
+        "predicate": fact.predicate,
+        "object": fact.object,
+        "category": fact.category,
+        "is_custom_predicate": fact.is_custom_predicate,
+        "bound": fact.bound,
+        "subject_entity_uuid": fact.subject_entity_uuid,
+        "object_entity_uuid": fact.object_entity_uuid,
+        "stored": not is_duplicate,
+        "duplicate": is_duplicate,
+    }
+
+
+@mcp.tool()
+async def query_facts(
+    subject: str = "",
+    object_value: str = "",
+    predicate: str = "",
+    category: str = "",
+    user_id: str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    Query facts with flexible filters. At least one filter is required.
+
+    Filters can be combined. Category must be one of: compositional, causal,
+    temporal, functional, associative, computed.
+
+    Example queries:
+    - "What is spark plug PART_OF?" -> query_facts(subject="spark plug", predicate="PART_OF")
+    - "All parts of engine?" -> query_facts(object_value="engine", category="compositional")
+    - "What does virus cause?" -> query_facts(subject="virus", category="causal")
+
+    Args:
+        subject: Filter by fact subject (case-insensitive)
+        object_value: Filter by fact object (case-insensitive)
+        predicate: Filter by exact predicate
+        category: Filter by predicate category
+        user_id: Scope to facts owned by this user
+        limit: Maximum results (1-100)
+
+    Returns:
+        List of matching facts with binding info
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    if not any([subject, object_value, predicate, category, user_id]):
+        return {
+            "error": "At least one filter (subject, object_value, predicate, "
+            "category, user_id) is required"
+        }
+
+    limit = max(1, min(100, limit))
+
+    facts = await ctx.graph.query_facts(
+        subject=subject or None,
+        object_value=object_value or None,
+        predicate=predicate or None,
+        category=category or None,
+        user_id=user_id or None,
+        limit=limit,
     )
 
     return {
-        "fact_id": fact.uuid,
-        "subject": subject,
-        "predicate": predicate,
-        "object": object_value,
-        "stored": True,
+        "count": len(facts),
+        "facts": [
+            {
+                "uuid": f.uuid,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object,
+                "confidence": f.confidence,
+                "source": f.source,
+                "category": f.category,
+                "is_custom_predicate": f.is_custom_predicate,
+                "bound": f.bound,
+                "subject_entity_uuid": f.subject_entity_uuid,
+                "object_entity_uuid": f.object_entity_uuid,
+                "created_at": str(f.created_at),
+            }
+            for f in facts
+        ],
     }
+
+
+@mcp.tool()
+async def update_fact(
+    fact_id: str,
+    subject: str = "",
+    predicate: str = "",
+    object_value: str = "",
+) -> dict[str, Any]:
+    """
+    Update an existing fact's fields.
+
+    Only provided (non-empty) fields are updated. The fact's category
+    is automatically re-computed if the predicate changes. Entity binding
+    is re-attempted if subject or object changes.
+
+    Args:
+        fact_id: UUID of the fact to update
+        subject: New subject (empty to keep current)
+        predicate: New predicate (empty to keep current)
+        object_value: New object (empty to keep current)
+
+    Returns:
+        Updated fact details
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    if predicate:
+        from .graph.schema import PredicateTaxonomy
+
+        if not PredicateTaxonomy.is_user_settable(predicate):
+            return {"error": f"Predicate '{predicate}' is in the 'computed' category"}
+
+    try:
+        updated = await ctx.graph.update_fact(
+            uuid=fact_id,
+            subject=subject or None,
+            predicate=predicate or None,
+            obj=object_value or None,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
+    if not updated:
+        return {"error": f"Fact '{fact_id}' not found"}
+
+    return {
+        "fact_id": updated.uuid,
+        "subject": updated.subject,
+        "predicate": updated.predicate,
+        "object": updated.object,
+        "confidence": updated.confidence,
+        "category": updated.category,
+        "is_custom_predicate": updated.is_custom_predicate,
+        "bound": updated.bound,
+        "updated": True,
+    }
+
+
+@mcp.tool()
+async def delete_fact(
+    fact_id: str,
+) -> dict[str, Any]:
+    """
+    Delete a fact from the knowledge graph.
+
+    This permanently removes the fact and all its relationships
+    (user ownership, entity bindings, reasoning trace links).
+
+    Args:
+        fact_id: UUID of the fact to delete
+
+    Returns:
+        Confirmation of deletion
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    deleted = await ctx.graph.delete_fact(fact_id)
+
+    if not deleted:
+        return {"error": f"Fact '{fact_id}' not found"}
+
+    return {"fact_id": fact_id, "deleted": True}
 
 
 @mcp.tool()
@@ -927,6 +1873,10 @@ async def get_user_context(
 ) -> dict[str, Any]:
     """
     Retrieve stored facts and preferences for a user.
+
+    Facts are grouped by predicate category (compositional, causal,
+    temporal, functional, associative, computed) with a summary of
+    totals, bound/unbound counts, and breakdown by source.
 
     Args:
         user_id: User identifier
@@ -937,19 +1887,13 @@ async def get_user_context(
     if not ctx.graph:
         return {"error": "Graph not initialized"}
 
-    facts = await ctx.graph.get_user_facts(user_id, limit=20)
+    grouped = await ctx.graph.get_user_facts_grouped(user_id, limit=100)
     preferences = await ctx.graph.get_user_preferences(user_id)
 
     return {
         "user_id": user_id,
-        "facts": [
-            {
-                "subject": f.subject,
-                "predicate": f.predicate,
-                "object": f.object,
-            }
-            for f in facts
-        ],
+        "facts": grouped["facts_by_category"],
+        "summary": grouped["summary"],
         "preferences": preferences,
     }
 
@@ -980,6 +1924,9 @@ async def semantic_search(
 
     try:
         results = await ctx.uht.semantic_search(query=query, limit=limit)
+
+        # Store returned entities in local graph for future lookups
+        await _store_factory_entities(results, source="uht_factory")
 
         return {
             "query": query,
@@ -1097,6 +2044,31 @@ async def get_patterns() -> dict[str, Any]:
             "0.00-0.19": "Fundamentally different",
             "0.00": "No overlap — strong exclusion signal",
         },
+        "fact_management": {
+            "name": "Relational Knowledge",
+            "description": "Store, query, and manage facts (relationships between entities) "
+            "with a controlled predicate taxonomy and automatic entity binding.",
+            "predicate_categories": {
+                "compositional": "PART_OF, CONTAINS, MADE_OF, COMPONENT_OF",
+                "causal": "CAUSES, ENABLES, PREVENTS, INHIBITS",
+                "temporal": "PRECEDES, FOLLOWS, DURING, CONCURRENT_WITH",
+                "functional": "TREATS, REGULATES, PRODUCES, CONSUMES, TRANSFORMS",
+                "associative": "RELATED_TO, USED_WITH, DERIVED_FROM, ANALOGOUS_TO (+ custom predicates)",
+                "computed": "SIMILAR_TO, INHERITS_FROM, DISTINCT_FROM (system-only)",
+            },
+            "tools": {
+                "store_fact(subject, predicate, object_value)": "Store a typed, categorized fact. Auto-binds to entities if they exist.",
+                "query_facts(subject?, object_value?, predicate?, category?)": "Bidirectional lookup by any combination of filters.",
+                "update_fact(fact_id, ...)": "Modify an existing fact. Re-categorizes and re-binds.",
+                "delete_fact(fact_id)": "Remove a fact and all its edges.",
+                "get_user_context(user_id)": "All facts grouped by category with summary stats.",
+            },
+            "entity_binding": "When both subject and object match classified entities, "
+            "a RELATED_TO edge is created between them in Neo4j. "
+            "Classifying an entity retroactively binds any pending facts.",
+            "store_similarity": "compare_entities(A, B, store_similarity=True) auto-stores a "
+            "computed SIMILAR_TO fact when Jaccard >= 0.70. Also works with batch_compare.",
+        },
     }
 
 
@@ -1139,7 +2111,8 @@ async def get_info() -> dict[str, Any]:
         "core_tools": {
             "reliable": [
                 {"tool": "classify_entity", "use": "Get hex code and inferred properties for any concept"},
-                {"tool": "compare_entities", "use": "Compare two entities — Jaccard, shared/unique traits"},
+                {"tool": "compare_entities", "use": "Compare two entities — Jaccard, shared/unique traits. Set store_similarity=True to persist high-similarity results."},
+                {"tool": "batch_compare", "use": "Compare one entity against many candidates. Set store_similarity=True to persist."},
                 {"tool": "infer_properties", "use": "Derive properties from classification via trait axioms"},
                 {"tool": "semantic_search", "use": "Find similar entities in 16k+ Factory corpus (USE THIS for analogies)"},
                 {"tool": "disambiguate_term", "use": "Get word senses for polysemous terms"},
@@ -1148,10 +2121,19 @@ async def get_info() -> dict[str, Any]:
                 {"tool": "get_traits", "use": "Get definitions of all 32 traits"},
                 {"tool": "get_info", "use": "Get this overview"},
             ],
+            "fact_management": [
+                {"tool": "store_fact", "use": "Store a typed fact (auto-categorized, auto-bound to entities)"},
+                {"tool": "query_facts", "use": "Query facts by subject, object, predicate, or category"},
+                {"tool": "update_fact", "use": "Modify a fact (re-categorizes and re-binds)"},
+                {"tool": "delete_fact", "use": "Remove a fact and all its edges"},
+                {"tool": "get_user_context", "use": "All facts grouped by category with summary stats"},
+            ],
+            "also_reliable": [
+                {"tool": "find_similar_entities", "use": "Find entities similar to a given entity by UUID"},
+                {"tool": "search_by_traits", "use": "Search Factory corpus by trait pattern (16k+ entities)"},
+            ],
             "experimental": [
-                {"tool": "find_similar_entities", "status": "Returns empty — use semantic_search instead"},
-                {"tool": "explore_neighborhood", "status": "Returns empty — use semantic_search instead"},
-                {"tool": "reason_about", "status": "Deprecated — use patterns with core tools instead"},
+                {"tool": "explore_neighborhood", "status": "Graph exploration — may return sparse results"},
             ],
         },
         "recommended_workflow": {
@@ -1294,6 +2276,47 @@ async def get_all_heuristics() -> str:
             f"**Applicability:** {h.applicability}",
             "",
         ])
+
+    return "\n".join(lines)
+
+
+@mcp.resource("uht://ontology")
+async def get_all_ontology() -> str:
+    """Get all ontological commitments.
+
+    Ontological commitments are foundational assumptions about how entities
+    relate to each other and how properties transfer between them.
+    """
+    if not ctx.inference:
+        return "Inference engine not initialized"
+
+    commitments = ctx.inference.ontology.get_all()
+
+    if not commitments:
+        return "# Ontological Commitments\n\nNo commitments loaded."
+
+    lines = ["# Ontological Commitments", ""]
+
+    # Group by category
+    by_category: dict[str, list] = {}
+    for c in commitments:
+        if c.category not in by_category:
+            by_category[c.category] = []
+        by_category[c.category].append(c)
+
+    for category, cat_commitments in by_category.items():
+        lines.append(f"## {category.replace('_', ' ').title()}")
+        lines.append("")
+        for c in cat_commitments:
+            lines.append(f"### {c.name}")
+            lines.append(f"**Statement:** {c.statement}")
+            if c.confidence < 1.0:
+                lines.append(f"**Confidence:** {c.confidence:.0%}")
+            if c.implications:
+                lines.append("**Implications:**")
+                for impl in c.implications:
+                    lines.append(f"  - {impl}")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -1509,6 +2532,7 @@ class ClassifyRequest(BaseModel):
     """Request model for classify endpoint."""
     entity: str
     context: str = ""
+    use_semantic_priors: bool = False
 
 
 class CompareRequest(BaseModel):
@@ -1533,6 +2557,11 @@ class BatchCompareRequest(BaseModel):
     """Request model for batch compare endpoint."""
     entity: str
     candidates: list[str]
+
+
+class MapPropertiesToTraitsRequest(BaseModel):
+    """Request model for map-properties-to-traits endpoint."""
+    properties: list[str]
 
 
 # Create FastAPI app for REST endpoints
@@ -1593,7 +2622,9 @@ async def api_patterns():
 @rest_api.post("/classify")
 async def api_classify(request: ClassifyRequest):
     """Classify an entity and get its hex code."""
-    return await classify_entity(request.entity, request.context)
+    return await classify_entity(
+        request.entity, request.context, use_semantic_priors=request.use_semantic_priors,
+    )
 
 
 @rest_api.post("/compare")
@@ -1620,6 +2651,12 @@ async def api_disambiguate(request: DisambiguateRequest):
     return await disambiguate_term(request.term, request.language)
 
 
+@rest_api.post("/map-properties-to-traits")
+async def api_map_properties_to_traits(request: MapPropertiesToTraitsRequest):
+    """Map natural language properties to candidate UHT trait bits."""
+    return await map_properties_to_traits(request.properties)
+
+
 @rest_api.get("/entities")
 async def api_list_entities(
     name_contains: str = Query(default="", description="Filter by name substring"),
@@ -1630,6 +2667,84 @@ async def api_list_entities(
     return await list_entities(hex_pattern, name_contains, limit, "both")
 
 
+@rest_api.get("/search/traits")
+async def api_search_by_traits(
+    # Physical layer
+    physical_object: bool | None = Query(default=None, description="Bit 1"),
+    synthetic: bool | None = Query(default=None, description="Bit 2"),
+    biological: bool | None = Query(default=None, description="Bit 3"),
+    powered: bool | None = Query(default=None, description="Bit 4"),
+    structural: bool | None = Query(default=None, description="Bit 5"),
+    observable: bool | None = Query(default=None, description="Bit 6"),
+    physical_medium: bool | None = Query(default=None, description="Bit 7"),
+    active: bool | None = Query(default=None, description="Bit 8"),
+    # Functional layer
+    intentionally_designed: bool | None = Query(default=None, description="Bit 9"),
+    outputs_effect: bool | None = Query(default=None, description="Bit 10"),
+    processes_signals: bool | None = Query(default=None, description="Bit 11"),
+    state_transforming: bool | None = Query(default=None, description="Bit 12"),
+    human_interactive: bool | None = Query(default=None, description="Bit 13"),
+    system_integrated: bool | None = Query(default=None, description="Bit 14"),
+    functionally_autonomous: bool | None = Query(default=None, description="Bit 15"),
+    system_essential: bool | None = Query(default=None, description="Bit 16"),
+    # Abstract layer
+    symbolic: bool | None = Query(default=None, description="Bit 17"),
+    signalling: bool | None = Query(default=None, description="Bit 18"),
+    rule_governed: bool | None = Query(default=None, description="Bit 19"),
+    compositional: bool | None = Query(default=None, description="Bit 20"),
+    normative: bool | None = Query(default=None, description="Bit 21"),
+    meta: bool | None = Query(default=None, description="Bit 22"),
+    temporal: bool | None = Query(default=None, description="Bit 23"),
+    digital_virtual: bool | None = Query(default=None, description="Bit 24"),
+    # Social layer
+    social_construct: bool | None = Query(default=None, description="Bit 25"),
+    institutionally_defined: bool | None = Query(default=None, description="Bit 26"),
+    identity_linked: bool | None = Query(default=None, description="Bit 27"),
+    regulated: bool | None = Query(default=None, description="Bit 28"),
+    economically_significant: bool | None = Query(default=None, description="Bit 29"),
+    politicised: bool | None = Query(default=None, description="Bit 30"),
+    ritualised: bool | None = Query(default=None, description="Bit 31"),
+    ethically_significant: bool | None = Query(default=None, description="Bit 32"),
+    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
+):
+    """Search Factory corpus by trait pattern."""
+    return await search_by_traits(
+        physical_object=physical_object,
+        synthetic=synthetic,
+        biological=biological,
+        powered=powered,
+        structural=structural,
+        observable=observable,
+        physical_medium=physical_medium,
+        active=active,
+        intentionally_designed=intentionally_designed,
+        outputs_effect=outputs_effect,
+        processes_signals=processes_signals,
+        state_transforming=state_transforming,
+        human_interactive=human_interactive,
+        system_integrated=system_integrated,
+        functionally_autonomous=functionally_autonomous,
+        system_essential=system_essential,
+        symbolic=symbolic,
+        signalling=signalling,
+        rule_governed=rule_governed,
+        compositional=compositional,
+        normative=normative,
+        meta=meta,
+        temporal=temporal,
+        digital_virtual=digital_virtual,
+        social_construct=social_construct,
+        institutionally_defined=institutionally_defined,
+        identity_linked=identity_linked,
+        regulated=regulated,
+        economically_significant=economically_significant,
+        politicised=politicised,
+        ritualised=ritualised,
+        ethically_significant=ethically_significant,
+        limit=limit,
+    )
+
+
 # =============================================================================
 # Main Entry Point
 # =============================================================================
@@ -1638,7 +2753,24 @@ async def api_list_entities(
 def create_combined_app():
     """Create a combined ASGI app with both REST API and MCP server."""
     from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import JSONResponse
     from starlette.routing import Mount
+
+    class BearerAuthMiddleware(BaseHTTPMiddleware):
+        """Require Bearer token on all requests when api_key is configured."""
+
+        async def dispatch(self, request, call_next):
+            if not settings.api_key:
+                return await call_next(request)
+            # Check Authorization header first, then ?token= query param
+            auth = request.headers.get("Authorization", "")
+            if auth == f"Bearer {settings.api_key}":
+                return await call_next(request)
+            if request.query_params.get("token") == settings.api_key:
+                return await call_next(request)
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     # Get the MCP ASGI app
     mcp_app = mcp.http_app(path="/mcp")
@@ -1662,6 +2794,7 @@ def create_combined_app():
             Mount("/api", app=rest_api),
             Mount("/", app=mcp_app),
         ],
+        middleware=[Middleware(BearerAuthMiddleware)],
         lifespan=chained_lifespan,
     )
 

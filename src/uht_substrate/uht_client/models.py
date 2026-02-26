@@ -248,12 +248,37 @@ class SemanticTriangle(BaseModel):
 
 
 class SimilarityResult(BaseModel):
-    """Result from similarity search."""
+    """Result from similarity search.
 
-    entity: Entity = Field(description="Similar entity")
-    similarity_score: float = Field(ge=0.0, le=1.0, description="Similarity score")
-    hamming_distance: Optional[int] = Field(default=None, description="Hamming distance")
-    shared_traits: list[int] = Field(default_factory=list, description="Shared trait positions")
+    Note: Factory API returns similarity_score as shared trait count (0-32),
+    not a normalized 0-1 score. We normalize it in the model.
+    """
+
+    uuid: str = Field(description="Entity UUID")
+    name: str = Field(description="Entity name")
+    hex_code: str = Field(alias="uht_code", description="8-char hex code")
+    description: Optional[str] = Field(default=None, description="Entity description")
+    shared_trait_count: int = Field(alias="similarity_score", ge=0, le=32, description="Number of shared traits")
+    binary: Optional[str] = Field(default=None, alias="binary_representation", description="32-bit binary")
+
+    model_config = {"populate_by_name": True}
+
+    @property
+    def similarity_score(self) -> float:
+        """Get normalized similarity score (0-1)."""
+        return self.shared_trait_count / 32
+
+    @property
+    def entity(self) -> "Entity":
+        """Get entity for backwards compatibility."""
+        return Entity(
+            uuid=self.uuid,
+            name=self.name,
+            hex_code=self.hex_code,
+            description=self.description,
+            binary=self.binary,
+            created_at=datetime.utcnow(),  # Placeholder
+        )
 
 
 class SemanticSearchResult(BaseModel):
