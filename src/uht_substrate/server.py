@@ -409,6 +409,104 @@ async def _map_properties_to_traits(
     return results
 
 
+async def _resolve_classification(
+    entity_name: str,
+    context: str | None = None,
+    force_refresh: bool = False,
+    namespace: str | None = None,
+) -> "ClassificationResult":
+    """Resolve an entity classification using local-first strategy.
+
+    Lookup order:
+    1. Local Neo4j graph (free, instant)
+    2. UHT Factory corpus search (cheap GET, 16k+ entities)
+    3. UHT Factory API classify (expensive POST, 32 parallel evaluators)
+
+    force_refresh=True skips steps 1-2 and always calls classify.
+    context/namespace are only used when a fresh classify is needed.
+
+    Returns a ClassificationResult (from local, Factory corpus, or fresh).
+    Stores the result locally if it came from an API call.
+    """
+    from uht_substrate.uht_client.models import ClassificationResult
+
+    # Step 1: Check local graph (unless force_refresh)
+    if not force_refresh and ctx.graph:
+        local = await ctx.graph.get_classification_by_name(entity_name)
+        if local:
+            logger.debug("Classification resolved from local graph", entity=entity_name)
+            return local
+
+    if not ctx.uht:
+        raise RuntimeError("UHT client not initialized")
+
+    # Step 2: Search Factory corpus (unless force_refresh)
+    if not force_refresh:
+        try:
+            existing = await ctx.uht.search_entities(query=entity_name, limit=5)
+            entity_lower = entity_name.lower()
+            for e in existing:
+                if e.name.lower() == entity_lower:
+                    logger.debug("Classification resolved from Factory corpus", entity=entity_name)
+                    binary = e.binary or _hex_to_binary(e.hex_code)
+                    # Use traits from search if available, else derive from hex
+                    traits = e.traits
+                    if not traits:
+                        from uht_substrate.uht_client.models import TraitValue
+                        traits = [
+                            TraitValue(
+                                bit_position=bit,
+                                name=TRAIT_NAMES.get(bit, f"Bit {bit}"),
+                                present=binary[bit - 1] == "1",
+                                confidence=1.0 if binary[bit - 1] == "1" else 0.0,
+                                justification=None,
+                            )
+                            for bit in range(1, 33)
+                        ]
+                    result = ClassificationResult(
+                        uuid=e.uuid,
+                        name=e.name,
+                        hex_code=e.hex_code,
+                        binary=binary,
+                        traits=traits,
+                        created_at=e.created_at,
+                    )
+                    # Cache locally
+                    if ctx.graph:
+                        await ctx.graph.upsert_entity(
+                            result,
+                            source="uht_factory",
+                            namespace=namespace,
+                        )
+                    return result
+        except Exception as e:
+            logger.warning("Factory corpus lookup failed, falling through to classify", error=str(e), entity=entity_name)
+
+    # Step 3: Fresh classification via API
+    result = await ctx.uht.classify(
+        entity=entity_name,
+        context=context,
+        force_refresh=force_refresh,
+        namespace=namespace,
+    )
+
+    # Store in local graph for future lookups
+    if ctx.graph:
+        await ctx.graph.upsert_entity(
+            result,
+            source="uht_factory",
+            description=context,
+            namespace=namespace,
+        )
+
+    return result
+
+
+def _hex_to_binary(hex_code: str) -> str:
+    """Convert 8-char hex code to 32-bit binary string."""
+    return bin(int(hex_code, 16))[2:].zfill(32)
+
+
 @mcp.tool()
 async def classify_entity(
     entity: str,
@@ -505,32 +603,25 @@ async def classify_entity(
                 qualified=classify_name,
             )
 
-        # Classify directly via UHT Factory API, passing context as description
-        # Namespace is used for cache key differentiation (same entity in different
-        # namespaces may need different classifications)
-        result = await ctx.uht.classify(
-            entity=classify_name,
+        # Resolve classification: local graph first, then API
+        result = await _resolve_classification(
+            entity_name=classify_name,
             context=context if context else None,
             force_refresh=force_refresh,
             namespace=namespace if namespace else None,
         )
 
-        # Store in local graph for future lookups
-        # Use original entity name (not namespace-qualified name) for storage
-        if ctx.graph:
-            # Create a copy with the original entity name if we used qualified name
-            store_result = result
-            if classify_name != entity:
-                # Override the name for storage
-                from uht_substrate.uht_client.models import ClassificationResult
-                store_result = ClassificationResult(
-                    uuid=result.uuid,
-                    name=entity,  # Use original name
-                    hex_code=result.hex_code,
-                    binary=result.binary,
-                    traits=result.traits,
-                    created_at=result.created_at,
-                )
+        # If we used a namespace-qualified name, re-store under original name
+        if classify_name != entity and ctx.graph:
+            from uht_substrate.uht_client.models import ClassificationResult
+            store_result = ClassificationResult(
+                uuid=result.uuid,
+                name=entity,
+                hex_code=result.hex_code,
+                binary=result.binary,
+                traits=result.traits,
+                created_at=result.created_at,
+            )
             await ctx.graph.upsert_entity(
                 store_result,
                 source="uht_factory",
@@ -612,32 +703,9 @@ async def find_similar_entities(
     min_shared_traits = min(max(min_shared_traits, 20), 32)
 
     try:
-        # First try to find existing entity in Factory corpus
-        existing = await ctx.uht.search_entities(query=entity, limit=5)
+        entity_data = await _resolve_classification(entity)
 
-        # Look for exact or close name match
-        entity_data = None
-        entity_lower = entity.lower()
-        for e in existing:
-            if e.name.lower() == entity_lower:
-                entity_data = e
-                break
-
-        # If no exact match, check local graph
-        if not entity_data:
-            local_entity = await ctx.graph.find_entity_by_name(entity)
-            if local_entity:
-                # Use local entity's UUID to get from Factory
-                try:
-                    entity_data = await ctx.uht.get_entity(local_entity.uuid)
-                except Exception:
-                    pass
-
-        # If still no match, classify fresh (last resort)
-        if not entity_data:
-            entity_data = await ctx.uht.classify(entity)
-
-        # Find similar via UHT API
+        # Find similar via UHT API (requires Factory UUID)
         similar_results = await ctx.uht.find_similar(
             uuid=entity_data.uuid,
             threshold=min_shared_traits,
@@ -671,32 +739,41 @@ async def list_entities(
     name_contains: str = "",
     namespace: str = "",
     limit: int = 50,
+    offset: int = 0,
     source: str = "both",
 ) -> dict[str, Any]:
     """
     List classified entities from the local graph and/or UHT Factory corpus.
+
+    Supports pagination via limit/offset. Response includes `total` count
+    and `has_more` flag so you can page through large result sets.
 
     Args:
         hex_pattern: Filter by hex code pattern (e.g., "C688" for tools)
         name_contains: Filter by name substring (case-insensitive)
         namespace: Filter by namespace (e.g., "SE", "SE:aerospace"). Includes descendants.
         limit: Maximum number of results (1-100)
+        offset: Skip first N results for pagination (default 0)
         source: "local" (Neo4j only), "factory" (UHT API only), or "both"
 
     Returns:
         List of entities with names, hex codes, and source
     """
     limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
     results = []
+    total = 0
 
     # Query local Neo4j graph
     if source in ("local", "both") and ctx.graph:
-        local_entities = await ctx.graph.list_entities(
+        local_entities, local_total = await ctx.graph.list_entities(
             name_contains=name_contains if name_contains else None,
             hex_pattern=hex_pattern if hex_pattern else None,
             namespace=namespace if namespace else None,
             limit=limit,
+            offset=offset,
         )
+        total = local_total
         for e in local_entities:
             results.append({
                 "name": e.name,
@@ -712,6 +789,7 @@ async def list_entities(
                 query=name_contains if name_contains else None,
                 uht_pattern=hex_pattern if hex_pattern else None,
                 limit=limit,
+                offset=offset,
             )
 
             # Store Factory entities in local graph for future lookups
@@ -726,12 +804,16 @@ async def list_entities(
                         "source": "factory",
                         "created_at": str(e.created_at) if e.created_at else None,
                     })
-        except Exception as e:
+        except Exception:
             # Factory query failed, continue with local results
             pass
 
     return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
         "count": len(results),
+        "has_more": offset + limit < total,
         "entities": results[:limit],
         "filters": {
             "hex_pattern": hex_pattern or None,
@@ -1153,14 +1235,13 @@ async def compare_entities(
             # Build justification lookups from classifications (will hit cache)
             justifications_a: dict[int, str | None] = {}
             justifications_b: dict[int, str | None] = {}
-            if ctx.uht:
-                try:
-                    class_a = await ctx.uht.classify(entity_a)
-                    class_b = await ctx.uht.classify(entity_b)
-                    justifications_a = {t.bit_position: t.justification for t in class_a.traits}
-                    justifications_b = {t.bit_position: t.justification for t in class_b.traits}
-                except Exception:
-                    pass  # Graceful fallback — justifications just won't be included
+            try:
+                class_a = await _resolve_classification(entity_a)
+                class_b = await _resolve_classification(entity_b)
+                justifications_a = {t.bit_position: t.justification for t in class_a.traits}
+                justifications_b = {t.bit_position: t.justification for t in class_b.traits}
+            except Exception:
+                pass  # Graceful fallback — justifications just won't be included
 
             # Include trait names with justifications for detailed analysis
             trait_diff = {
@@ -1260,17 +1341,17 @@ async def batch_compare(
 
     candidates = candidates[:20]  # Limit to 20 candidates
 
-    # First classify the main entity
+    # First resolve the main entity classification (local-first)
     try:
-        main_class = await ctx.uht.classify(entity)
+        main_class = await _resolve_classification(entity)
     except Exception as e:
         return {"error": f"Failed to classify {entity}: {e}"}
 
-    # Classify all candidates in parallel
+    # Resolve all candidates in parallel (local-first for each)
     import asyncio
     async def classify_candidate(name: str):
         try:
-            return (name, await ctx.uht.classify(name))
+            return (name, await _resolve_classification(name))
         except Exception:
             return (name, None)
 
@@ -1445,31 +1526,9 @@ async def explore_neighborhood(
     min_similarity = min(max(min_similarity, 0.0), 1.0)
 
     try:
-        # First try to find existing entity in Factory corpus
-        existing = await ctx.uht.search_entities(query=entity, limit=5)
+        entity_data = await _resolve_classification(entity)
 
-        # Look for exact or close name match
-        entity_data = None
-        entity_lower = entity.lower()
-        for e in existing:
-            if e.name.lower() == entity_lower:
-                entity_data = e
-                break
-
-        # If no exact match, check local graph
-        if not entity_data:
-            local_entity = await ctx.graph.find_entity_by_name(entity)
-            if local_entity:
-                try:
-                    entity_data = await ctx.uht.get_entity(local_entity.uuid)
-                except Exception:
-                    pass
-
-        # If still no match, classify fresh (last resort)
-        if not entity_data:
-            entity_data = await ctx.uht.classify(entity)
-
-        # Get neighborhood from UHT
+        # Get neighborhood from UHT (requires Factory UUID)
         neighborhood = await ctx.uht.get_neighborhood(
             uuid=entity_data.uuid,
             metric=metric,
@@ -1710,12 +1769,162 @@ async def store_fact(
 
 
 @mcp.tool()
+async def store_facts_bulk(
+    facts: list[dict[str, str]],
+) -> dict[str, Any]:
+    """
+    Store multiple facts in a single call.
+
+    Accepts an array of fact objects and stores them sequentially.
+    Each fact follows the same behaviour as store_fact. Returns an
+    array of results in the same order as the input.
+
+    Args:
+        facts: Array of fact objects, each with keys:
+               subject (required), predicate (required),
+               object_value (required), user_id (optional, defaults to "default")
+
+    Returns:
+        Array of results in the same order as input
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    if not facts:
+        return {"error": "facts array is empty"}
+
+    from .graph.schema import PredicateTaxonomy
+
+    results = []
+    stored_count = 0
+    error_count = 0
+
+    for i, item in enumerate(facts):
+        # Validate required fields
+        subject = item.get("subject", "")
+        predicate = item.get("predicate", "")
+        object_value = item.get("object_value", "")
+        user_id = item.get("user_id", "default")
+
+        if not subject or not predicate or not object_value:
+            results.append({
+                "index": i,
+                "error": "Missing required field(s): subject, predicate, object_value",
+            })
+            error_count += 1
+            continue
+
+        if not PredicateTaxonomy.is_user_settable(predicate):
+            results.append({
+                "index": i,
+                "error": f"Predicate '{predicate}' is in the 'computed' category",
+            })
+            error_count += 1
+            continue
+
+        try:
+            fact = await ctx.graph.store_fact(
+                subject=subject,
+                predicate=predicate,
+                obj=object_value,
+                confidence=1.0,
+                source="asserted",
+                user_id=user_id,
+            )
+            is_duplicate = getattr(fact, "_is_duplicate", False)
+            results.append({
+                "index": i,
+                "fact_id": fact.uuid,
+                "subject": fact.subject,
+                "predicate": fact.predicate,
+                "object": fact.object,
+                "category": fact.category,
+                "bound": fact.bound,
+                "stored": not is_duplicate,
+                "duplicate": is_duplicate,
+            })
+            stored_count += 1
+        except ValueError as e:
+            results.append({"index": i, "error": str(e)})
+            error_count += 1
+
+    return {
+        "total": len(facts),
+        "stored": stored_count,
+        "errors": error_count,
+        "results": results,
+    }
+
+
+@mcp.tool()
+async def upsert_fact(
+    subject: str,
+    predicate: str,
+    object_value: str,
+    user_id: str = "default",
+) -> dict[str, Any]:
+    """
+    Upsert a fact: match on (subject, predicate, user_id).
+
+    If a fact with that combination already exists, update its object_value.
+    If not, create a new fact. Returns the fact with a flag indicating
+    whether it was created or updated.
+
+    Args:
+        subject: Subject of the fact
+        predicate: Relationship/predicate
+        object_value: Object of the fact
+        user_id: User identifier
+
+    Returns:
+        Fact details with created/updated flags
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    from .graph.schema import PredicateTaxonomy
+
+    if not PredicateTaxonomy.is_user_settable(predicate):
+        return {
+            "error": f"Predicate '{predicate}' is in the 'computed' category "
+            "and cannot be set directly. Use a different predicate."
+        }
+
+    try:
+        fact, was_created = await ctx.graph.upsert_fact(
+            subject=subject,
+            predicate=predicate,
+            obj=object_value,
+            confidence=1.0,
+            source="asserted",
+            user_id=user_id,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
+    return {
+        "fact_id": fact.uuid,
+        "subject": fact.subject,
+        "predicate": fact.predicate,
+        "object": fact.object,
+        "category": fact.category,
+        "is_custom_predicate": fact.is_custom_predicate,
+        "bound": fact.bound,
+        "subject_entity_uuid": fact.subject_entity_uuid,
+        "object_entity_uuid": fact.object_entity_uuid,
+        "created": was_created,
+        "updated": not was_created,
+    }
+
+
+@mcp.tool()
 async def query_facts(
     subject: str = "",
     object_value: str = "",
     predicate: str = "",
     category: str = "",
     user_id: str = "",
+    namespace: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
     """
@@ -1735,6 +1944,7 @@ async def query_facts(
         predicate: Filter by exact predicate
         category: Filter by predicate category
         user_id: Scope to facts owned by this user
+        namespace: Filter by namespace (e.g., "SE", "SE:aerospace"). Includes descendants.
         limit: Maximum results (1-100)
 
     Returns:
@@ -1743,10 +1953,10 @@ async def query_facts(
     if not ctx.graph:
         return {"error": "Graph not initialized"}
 
-    if not any([subject, object_value, predicate, category, user_id]):
+    if not any([subject, object_value, predicate, category, user_id, namespace]):
         return {
             "error": "At least one filter (subject, object_value, predicate, "
-            "category, user_id) is required"
+            "category, user_id, namespace) is required"
         }
 
     limit = max(1, min(100, limit))
@@ -1757,6 +1967,7 @@ async def query_facts(
         predicate=predicate or None,
         category=category or None,
         user_id=user_id or None,
+        namespace=namespace or None,
         limit=limit,
     )
 
@@ -1895,6 +2106,91 @@ async def get_user_context(
         "facts": grouped["facts_by_category"],
         "summary": grouped["summary"],
         "preferences": preferences,
+    }
+
+
+@mcp.tool()
+async def get_namespace_context(
+    namespace: str,
+    user_id: str = "",
+) -> dict[str, Any]:
+    """
+    Get all entities and facts under a namespace subtree.
+
+    Returns every entity assigned to the given namespace (or any descendant
+    namespace), along with their hex codes and all facts whose subject is
+    one of those entities. Essentially a single-call dump of everything
+    stored under a namespace subtree.
+
+    Args:
+        namespace: Namespace code (e.g. "CLAUDE", "SE:aerospace")
+        user_id: Optional user ID to scope facts to (empty for all facts)
+
+    Returns:
+        Entities with hex codes, facts, and namespace tree
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    # Validate namespace exists
+    ns = await ctx.graph.get_namespace(namespace)
+    if not ns:
+        return {"error": f"Namespace '{namespace}' not found"}
+
+    # Get entities + facts
+    context = await ctx.graph.get_namespace_context(
+        namespace_code=namespace,
+        user_id=user_id or None,
+    )
+
+    # Get namespace tree
+    namespaces = await ctx.graph.list_namespaces(
+        parent_code=namespace,
+        include_descendants=True,
+    )
+    # Include the root namespace itself
+    all_namespaces = [ns] + namespaces
+
+    return {
+        "namespace": namespace,
+        "namespaces": [
+            {
+                "code": n.code,
+                "name": n.name,
+                "description": n.description,
+                "is_root": n.is_root,
+            }
+            for n in all_namespaces
+        ],
+        "entities": [
+            {
+                "uuid": e.uuid,
+                "name": e.name,
+                "hex_code": e.hex_code,
+                "description": e.description,
+                "source": e.source,
+            }
+            for e in context["entities"]
+        ],
+        "facts": [
+            {
+                "uuid": f.uuid,
+                "subject": f.subject,
+                "predicate": f.predicate,
+                "object": f.object,
+                "confidence": f.confidence,
+                "source": f.source,
+                "category": f.category,
+                "bound": f.bound,
+                "created_at": str(f.created_at),
+            }
+            for f in context["facts"]
+        ],
+        "summary": {
+            "namespace_count": len(all_namespaces),
+            "entity_count": len(context["entities"]),
+            "fact_count": len(context["facts"]),
+        },
     }
 
 
@@ -2123,10 +2419,13 @@ async def get_info() -> dict[str, Any]:
             ],
             "fact_management": [
                 {"tool": "store_fact", "use": "Store a typed fact (auto-categorized, auto-bound to entities)"},
-                {"tool": "query_facts", "use": "Query facts by subject, object, predicate, or category"},
+                {"tool": "upsert_fact", "use": "Idempotent store: match on (subject, predicate, user_id), update object_value if exists, create if not"},
+                {"tool": "store_facts_bulk", "use": "Store multiple facts in one call — array of {subject, predicate, object_value, user_id?}"},
+                {"tool": "query_facts", "use": "Query facts by subject, object, predicate, category, or namespace (includes descendants)"},
                 {"tool": "update_fact", "use": "Modify a fact (re-categorizes and re-binds)"},
                 {"tool": "delete_fact", "use": "Remove a fact and all its edges"},
                 {"tool": "get_user_context", "use": "All facts grouped by category with summary stats"},
+                {"tool": "get_namespace_context", "use": "Single-call dump of all entities and facts under a namespace subtree"},
             ],
             "also_reliable": [
                 {"tool": "find_similar_entities", "use": "Find entities similar to a given entity by UUID"},
@@ -2662,9 +2961,10 @@ async def api_list_entities(
     name_contains: str = Query(default="", description="Filter by name substring"),
     hex_pattern: str = Query(default="", description="Filter by hex pattern"),
     limit: int = Query(default=50, ge=1, le=100, description="Max results"),
+    offset: int = Query(default=0, ge=0, description="Skip N results"),
 ):
     """List entities in local graph."""
-    return await list_entities(hex_pattern, name_contains, limit, "both")
+    return await list_entities(hex_pattern, name_contains, "", limit, offset, "both")
 
 
 @rest_api.get("/search/traits")

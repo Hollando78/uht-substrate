@@ -205,6 +205,64 @@ class GraphRepository:
 
         return self._parse_entity(result[0]["e"])
 
+    async def get_classification_by_name(self, name: str) -> Optional["ClassificationResult"]:
+        """
+        Reconstruct a ClassificationResult from local graph data.
+
+        Returns None if entity not found or has no traits stored.
+        """
+        from uht_substrate.uht_client.models import ClassificationResult, TraitValue
+
+        result = await self._conn.execute_query(
+            queries.FIND_ENTITY_WITH_TRAITS_BY_NAME,
+            {"name": name},
+        )
+        if not result:
+            return None
+
+        e = result[0]["e"]
+        raw_traits = result[0].get("traits", [])
+
+        # Filter out null entries from OPTIONAL MATCH
+        traits = [t for t in raw_traits if t.get("bit_position") is not None]
+        if not traits:
+            return None
+
+        trait_values = [
+            TraitValue(
+                bit_position=t["bit_position"],
+                name=t.get("name", ""),
+                present=True,  # Only present traits are stored as HAS_TRAIT edges
+                confidence=t.get("confidence", 1.0),
+                justification=t.get("justification"),
+            )
+            for t in sorted(traits, key=lambda t: t["bit_position"])
+        ]
+
+        # Fill in absent traits (bits without HAS_TRAIT edges)
+        present_bits = {t.bit_position for t in trait_values}
+        for bit in range(1, 33):
+            if bit not in present_bits:
+                trait_values.append(
+                    TraitValue(
+                        bit_position=bit,
+                        name="",
+                        present=False,
+                        confidence=0.0,
+                        justification=None,
+                    )
+                )
+        trait_values.sort(key=lambda t: t.bit_position)
+
+        return ClassificationResult(
+            uuid=e["uuid"],
+            name=e["name"],
+            hex_code=e["hex_code"],
+            binary=e["binary_code"],
+            traits=trait_values,
+            created_at=e.get("created_at", datetime.utcnow()),
+        )
+
     async def search_entities(self, query: str, limit: int = 100) -> list[StoredEntity]:
         """
         Search entities by name substring.
@@ -229,31 +287,34 @@ class GraphRepository:
         hex_pattern: Optional[str] = None,
         namespace: Optional[str] = None,
         limit: int = 100,
-    ) -> list[StoredEntity]:
+        offset: int = 0,
+    ) -> tuple[list[StoredEntity], int]:
         """
-        List entities with optional filters.
+        List entities with optional filters, returning results and total count.
 
         Args:
             name_contains: Filter by name substring (case-insensitive)
             hex_pattern: Filter by hex code prefix
             namespace: Filter by namespace (includes descendants)
-            limit: Maximum results
+            limit: Maximum results per page
+            offset: Number of results to skip (for pagination)
 
         Returns:
-            List of matching entities
+            Tuple of (list of matching entities, total count matching filters)
         """
         # If namespace filter provided, use the namespace-specific method
         if namespace:
-            return await self.list_entities_in_namespace(
+            entities = await self.list_entities_in_namespace(
                 namespace_code=namespace,
                 name_contains=name_contains,
                 hex_pattern=hex_pattern,
                 limit=limit,
             )
+            return entities, len(entities)
 
         # Build dynamic query
         conditions = []
-        params: dict[str, object] = {"limit": limit}
+        params: dict[str, object] = {"limit": limit, "offset": offset}
 
         if name_contains:
             conditions.append("toLower(e.name) CONTAINS toLower($name_filter)")
@@ -269,12 +330,22 @@ class GraphRepository:
             MATCH (e:Entity)
             {where_clause}
             RETURN e
-            ORDER BY e.created_at DESC
+            ORDER BY e.name ASC
+            SKIP $offset
             LIMIT $limit
         """
 
+        count_query = f"""
+            MATCH (e:Entity)
+            {where_clause}
+            RETURN count(e) AS total
+        """
+
         result = await self._conn.execute_query(query, params)
-        return [self._parse_entity(r["e"]) for r in result]
+        count_result = await self._conn.execute_query(count_query, params)
+        total = count_result[0]["total"] if count_result else 0
+
+        return [self._parse_entity(r["e"]) for r in result], total
 
     async def find_similar_entities(
         self,
@@ -559,6 +630,89 @@ class GraphRepository:
             object_entity_uuid=obj_uuid,
         )
 
+    async def upsert_fact(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+        confidence: float = 1.0,
+        source: str = "asserted",
+        user_id: Optional[str] = None,
+    ) -> tuple[StoredFact, bool]:
+        """
+        Upsert a fact: match on (subject, predicate, user_id).
+
+        If a fact with that combination already exists, update its object
+        value. If not, create a new fact.
+
+        Args:
+            subject: Subject of the fact
+            predicate: Predicate/relationship
+            obj: Object of the fact
+            confidence: Confidence level (0-1)
+            source: Source of the fact
+            user_id: Optional user ID to scope the upsert
+
+        Returns:
+            Tuple of (StoredFact, was_created: bool)
+
+        Raises:
+            ValueError: If a computed predicate is used with source='asserted'
+        """
+        from .schema import PredicateTaxonomy
+
+        normalized_predicate = predicate.strip().upper().replace(" ", "_")
+        category, is_custom = PredicateTaxonomy.categorize(normalized_predicate)
+
+        if source == "asserted" and category == "computed":
+            raise ValueError(
+                f"Predicate '{predicate}' is in the 'computed' category "
+                "and cannot be set by users. Use a different predicate."
+            )
+
+        # Look for existing fact matching (subject, predicate, user_id)
+        if user_id:
+            existing = await self._conn.execute_query(
+                queries.FIND_FACT_FOR_UPSERT,
+                {
+                    "user_id": user_id,
+                    "subject": subject,
+                    "predicate": normalized_predicate,
+                },
+            )
+        else:
+            existing = await self._conn.execute_query(
+                queries.FIND_FACT_FOR_UPSERT_GLOBAL,
+                {
+                    "subject": subject,
+                    "predicate": normalized_predicate,
+                },
+            )
+
+        if existing:
+            # Update the existing fact's object value
+            existing_fact = self._parse_fact(existing[0]["f"])
+            updated = await self.update_fact(
+                uuid=existing_fact.uuid,
+                obj=obj,
+                confidence=confidence,
+            )
+            if updated:
+                return updated, False
+            # Fallback: if update failed somehow, return existing
+            return existing_fact, False
+
+        # No existing fact — create new one
+        fact = await self.store_fact(
+            subject=subject,
+            predicate=predicate,
+            obj=obj,
+            confidence=confidence,
+            source=source,
+            user_id=user_id,
+        )
+        return fact, True
+
     async def get_facts_by_subject(
         self,
         subject: str,
@@ -611,6 +765,7 @@ class GraphRepository:
         category: Optional[str] = None,
         source: Optional[str] = None,
         user_id: Optional[str] = None,
+        namespace: Optional[str] = None,
         limit: int = 50,
     ) -> list[StoredFact]:
         """
@@ -623,6 +778,8 @@ class GraphRepository:
             category: Filter by predicate category
             source: Filter by source type
             user_id: Scope to facts owned by this user
+            namespace: Scope to facts whose subject entity belongs
+                       to this namespace or its descendants
             limit: Maximum results
 
         Returns:
@@ -632,30 +789,39 @@ class GraphRepository:
         if predicate:
             predicate = predicate.strip().upper().replace(" ", "_")
 
-        if user_id:
+        params = {
+            "subject": subject,
+            "object": object_value,
+            "predicate": predicate,
+            "category": category,
+            "source": source,
+            "limit": limit,
+        }
+
+        if namespace:
+            if user_id:
+                params["user_id"] = user_id
+                params["namespace_code"] = namespace
+                result = await self._conn.execute_query(
+                    queries.QUERY_USER_FACTS_IN_NAMESPACE,
+                    params,
+                )
+            else:
+                params["namespace_code"] = namespace
+                result = await self._conn.execute_query(
+                    queries.QUERY_FACTS_IN_NAMESPACE,
+                    params,
+                )
+        elif user_id:
+            params["user_id"] = user_id
             result = await self._conn.execute_query(
                 queries.QUERY_USER_FACTS,
-                {
-                    "user_id": user_id,
-                    "subject": subject,
-                    "object": object_value,
-                    "predicate": predicate,
-                    "category": category,
-                    "source": source,
-                    "limit": limit,
-                },
+                params,
             )
         else:
             result = await self._conn.execute_query(
                 queries.QUERY_FACTS,
-                {
-                    "subject": subject,
-                    "object": object_value,
-                    "predicate": predicate,
-                    "category": category,
-                    "source": source,
-                    "limit": limit,
-                },
+                params,
             )
 
         return [self._parse_fact(r["f"]) for r in result]
@@ -1477,6 +1643,54 @@ class GraphRepository:
             {"namespace_code": namespace_code},
         )
         return result[0]["entity_count"] if result else 0
+
+    async def get_namespace_context(
+        self,
+        namespace_code: str,
+        user_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Get all entities and their facts under a namespace subtree.
+
+        Returns entities with hex codes and all facts whose subject is
+        an entity in the namespace (or descendants).
+
+        Args:
+            namespace_code: Root namespace code
+            user_id: Optional user ID to scope facts
+
+        Returns:
+            Dict with 'entities' and 'facts' lists
+        """
+        if user_id:
+            result = await self._conn.execute_query(
+                queries.GET_NAMESPACE_CONTEXT_USER,
+                {"namespace_code": namespace_code, "user_id": user_id},
+            )
+        else:
+            result = await self._conn.execute_query(
+                queries.GET_NAMESPACE_CONTEXT,
+                {"namespace_code": namespace_code},
+            )
+
+        entities = []
+        all_facts = []
+        seen_fact_uuids: set[str] = set()
+
+        for row in result:
+            entity = self._parse_entity(row["e"])
+            entities.append(entity)
+
+            for f_data in row.get("facts", []):
+                if f_data and f_data.get("uuid"):
+                    if f_data["uuid"] not in seen_fact_uuids:
+                        seen_fact_uuids.add(f_data["uuid"])
+                        all_facts.append(self._parse_fact(f_data))
+
+        return {
+            "entities": entities,
+            "facts": all_facts,
+        }
 
     # =========================================================================
     # Statistics

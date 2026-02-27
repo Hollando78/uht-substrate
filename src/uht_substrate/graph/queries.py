@@ -108,6 +108,14 @@ RETURN t, r.confidence as confidence, r.justification as justification
 ORDER BY t.bit_position
 """
 
+FIND_ENTITY_WITH_TRAITS_BY_NAME = """
+MATCH (e:Entity)
+WHERE toLower(e.name) = toLower($name)
+OPTIONAL MATCH (e)-[r:HAS_TRAIT]->(t:Trait)
+RETURN e, collect({bit_position: t.bit_position, name: t.name, confidence: r.confidence, justification: r.justification}) AS traits
+LIMIT 1
+"""
+
 # =============================================================================
 # Relationship Queries
 # =============================================================================
@@ -163,6 +171,22 @@ MATCH (f:Fact)
 WHERE toLower(f.subject) = toLower($subject)
   AND f.predicate = $predicate
   AND toLower(f.object) = toLower($object)
+RETURN f
+LIMIT 1
+"""
+
+FIND_FACT_FOR_UPSERT = """
+MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
+WHERE toLower(f.subject) = toLower($subject)
+  AND f.predicate = $predicate
+RETURN f
+LIMIT 1
+"""
+
+FIND_FACT_FOR_UPSERT_GLOBAL = """
+MATCH (f:Fact)
+WHERE toLower(f.subject) = toLower($subject)
+  AND f.predicate = $predicate
 RETURN f
 LIMIT 1
 """
@@ -244,6 +268,36 @@ WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
   AND ($category IS NULL OR f.category = $category)
   AND ($source IS NULL OR f.source = $source)
 RETURN f
+ORDER BY f.created_at DESC
+LIMIT $limit
+"""
+
+QUERY_FACTS_IN_NAMESPACE = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+MATCH (f:Fact)-[:FACT_ABOUT]->(e)
+WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+  AND ($object IS NULL OR toLower(f.object) = toLower($object))
+  AND ($predicate IS NULL OR f.predicate = $predicate)
+  AND ($category IS NULL OR f.category = $category)
+  AND ($source IS NULL OR f.source = $source)
+RETURN DISTINCT f
+ORDER BY f.created_at DESC
+LIMIT $limit
+"""
+
+QUERY_USER_FACTS_IN_NAMESPACE = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)-[:FACT_ABOUT]->(e)
+WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+  AND ($object IS NULL OR toLower(f.object) = toLower($object))
+  AND ($predicate IS NULL OR f.predicate = $predicate)
+  AND ($category IS NULL OR f.category = $category)
+  AND ($source IS NULL OR f.source = $source)
+RETURN DISTINCT f
 ORDER BY f.created_at DESC
 LIMIT $limit
 """
@@ -625,6 +679,26 @@ WHERE ($name_filter IS NULL OR toLower(e.name) CONTAINS toLower($name_filter))
 RETURN DISTINCT e
 ORDER BY e.created_at DESC
 LIMIT $limit
+"""
+
+GET_NAMESPACE_CONTEXT = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+WITH DISTINCT e
+OPTIONAL MATCH (f:Fact)-[:FACT_ABOUT]->(e)
+RETURN e, collect(DISTINCT f) AS facts
+ORDER BY e.name
+"""
+
+GET_NAMESPACE_CONTEXT_USER = """
+MATCH (root:Namespace {code: $namespace_code})
+MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
+MATCH (e:Entity)-[:BELONGS_TO]->(ns)
+WITH DISTINCT e
+OPTIONAL MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)-[:FACT_ABOUT]->(e)
+RETURN e, collect(DISTINCT f) AS facts
+ORDER BY e.name
 """
 
 COUNT_ENTITIES_IN_NAMESPACE = """
