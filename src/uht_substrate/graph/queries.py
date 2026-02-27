@@ -201,6 +201,7 @@ CREATE (f:Fact {
     source: $source,
     category: $category,
     is_custom_predicate: $is_custom_predicate,
+    namespace: $namespace,
     bound: false,
     created_at: datetime(),
     updated_at: datetime()
@@ -221,6 +222,7 @@ SET f.subject = COALESCE($subject, f.subject),
     f.confidence = COALESCE($confidence, f.confidence),
     f.category = COALESCE($category, f.category),
     f.is_custom_predicate = COALESCE($is_custom_predicate, f.is_custom_predicate),
+    f.namespace = COALESCE($namespace, f.namespace),
     f.updated_at = datetime()
 RETURN f
 """
@@ -275,14 +277,15 @@ LIMIT $limit
 QUERY_FACTS_IN_NAMESPACE = """
 MATCH (root:Namespace {code: $namespace_code})
 MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
-MATCH (e:Entity)-[:BELONGS_TO]->(ns)
-MATCH (f:Fact)-[:FACT_ABOUT]->(e)
-WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+WITH collect(DISTINCT ns.code) AS ns_codes
+MATCH (f:Fact)
+WHERE f.namespace IN ns_codes
+  AND ($subject IS NULL OR toLower(f.subject) = toLower($subject))
   AND ($object IS NULL OR toLower(f.object) = toLower($object))
   AND ($predicate IS NULL OR f.predicate = $predicate)
   AND ($category IS NULL OR f.category = $category)
   AND ($source IS NULL OR f.source = $source)
-RETURN DISTINCT f
+RETURN f
 ORDER BY f.created_at DESC
 LIMIT $limit
 """
@@ -290,14 +293,15 @@ LIMIT $limit
 QUERY_USER_FACTS_IN_NAMESPACE = """
 MATCH (root:Namespace {code: $namespace_code})
 MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
-MATCH (e:Entity)-[:BELONGS_TO]->(ns)
-MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)-[:FACT_ABOUT]->(e)
-WHERE ($subject IS NULL OR toLower(f.subject) = toLower($subject))
+WITH collect(DISTINCT ns.code) AS ns_codes
+MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
+WHERE f.namespace IN ns_codes
+  AND ($subject IS NULL OR toLower(f.subject) = toLower($subject))
   AND ($object IS NULL OR toLower(f.object) = toLower($object))
   AND ($predicate IS NULL OR f.predicate = $predicate)
   AND ($category IS NULL OR f.category = $category)
   AND ($source IS NULL OR f.source = $source)
-RETURN DISTINCT f
+RETURN f
 ORDER BY f.created_at DESC
 LIMIT $limit
 """
@@ -684,21 +688,25 @@ LIMIT $limit
 GET_NAMESPACE_CONTEXT = """
 MATCH (root:Namespace {code: $namespace_code})
 MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
-MATCH (e:Entity)-[:BELONGS_TO]->(ns)
-WITH DISTINCT e
-OPTIONAL MATCH (f:Fact)-[:FACT_ABOUT]->(e)
-RETURN e, collect(DISTINCT f) AS facts
-ORDER BY e.name
+WITH collect(DISTINCT ns.code) AS ns_codes
+OPTIONAL MATCH (e:Entity)-[:BELONGS_TO]->(ns2:Namespace)
+WHERE ns2.code IN ns_codes
+WITH ns_codes, collect(DISTINCT e) AS entities
+OPTIONAL MATCH (f:Fact)
+WHERE f.namespace IN ns_codes
+RETURN entities, collect(DISTINCT f) AS facts
 """
 
 GET_NAMESPACE_CONTEXT_USER = """
 MATCH (root:Namespace {code: $namespace_code})
 MATCH (root)-[:PARENT_OF*0..]->(ns:Namespace)
-MATCH (e:Entity)-[:BELONGS_TO]->(ns)
-WITH DISTINCT e
-OPTIONAL MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)-[:FACT_ABOUT]->(e)
-RETURN e, collect(DISTINCT f) AS facts
-ORDER BY e.name
+WITH collect(DISTINCT ns.code) AS ns_codes
+OPTIONAL MATCH (e:Entity)-[:BELONGS_TO]->(ns2:Namespace)
+WHERE ns2.code IN ns_codes
+WITH ns_codes, collect(DISTINCT e) AS entities
+OPTIONAL MATCH (uc:UserContext {user_id: $user_id})-[:OWNS_FACT]->(f:Fact)
+WHERE f.namespace IN ns_codes
+RETURN entities, collect(DISTINCT f) AS facts
 """
 
 COUNT_ENTITIES_IN_NAMESPACE = """

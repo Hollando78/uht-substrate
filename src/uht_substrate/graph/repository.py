@@ -44,6 +44,7 @@ class StoredFact:
     bound: bool = False
     subject_entity_uuid: Optional[str] = None
     object_entity_uuid: Optional[str] = None
+    namespace: Optional[str] = None
     updated_at: Optional[datetime] = None
     _is_duplicate: bool = False  # Transient flag, not persisted
 
@@ -510,6 +511,7 @@ class GraphRepository:
         source: str = "asserted",
         user_id: Optional[str] = None,
         trace_uuid: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> StoredFact:
         """
         Store a fact in the knowledge graph.
@@ -527,6 +529,7 @@ class GraphRepository:
             source: Source of the fact ('asserted', 'computed', 'inferred')
             user_id: Optional user ID to link fact to
             trace_uuid: Optional reasoning trace UUID
+            namespace: Optional namespace tag (e.g. "CLAUDE:projects")
 
         Returns:
             The stored fact
@@ -577,6 +580,7 @@ class GraphRepository:
             "source": source,
             "category": category,
             "is_custom_predicate": is_custom,
+            "namespace": namespace,
         }
 
         result = await self._conn.execute_write(queries.CREATE_FACT, params)
@@ -628,6 +632,7 @@ class GraphRepository:
             bound=bool(subj_uuid and obj_uuid),
             subject_entity_uuid=subj_uuid,
             object_entity_uuid=obj_uuid,
+            namespace=namespace,
         )
 
     async def upsert_fact(
@@ -638,6 +643,7 @@ class GraphRepository:
         confidence: float = 1.0,
         source: str = "asserted",
         user_id: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> tuple[StoredFact, bool]:
         """
         Upsert a fact: match on (subject, predicate, user_id).
@@ -652,6 +658,7 @@ class GraphRepository:
             confidence: Confidence level (0-1)
             source: Source of the fact
             user_id: Optional user ID to scope the upsert
+            namespace: Optional namespace tag (e.g. "CLAUDE:projects")
 
         Returns:
             Tuple of (StoredFact, was_created: bool)
@@ -696,6 +703,7 @@ class GraphRepository:
                 uuid=existing_fact.uuid,
                 obj=obj,
                 confidence=confidence,
+                namespace=namespace,
             )
             if updated:
                 return updated, False
@@ -710,6 +718,7 @@ class GraphRepository:
             confidence=confidence,
             source=source,
             user_id=user_id,
+            namespace=namespace,
         )
         return fact, True
 
@@ -833,6 +842,7 @@ class GraphRepository:
         predicate: Optional[str] = None,
         obj: Optional[str] = None,
         confidence: Optional[float] = None,
+        namespace: Optional[str] = None,
     ) -> Optional[StoredFact]:
         """
         Update a fact's fields. Only provided (non-None) fields are updated.
@@ -846,6 +856,7 @@ class GraphRepository:
             predicate: New predicate (None to keep current)
             obj: New object (None to keep current)
             confidence: New confidence (None to keep current)
+            namespace: New namespace (None to keep current)
 
         Returns:
             Updated fact, or None if not found
@@ -875,6 +886,7 @@ class GraphRepository:
                 "confidence": confidence,
                 "category": category,
                 "is_custom_predicate": is_custom,
+                "namespace": namespace,
             },
         )
 
@@ -1650,10 +1662,10 @@ class GraphRepository:
         user_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """
-        Get all entities and their facts under a namespace subtree.
+        Get all entities and namespace-tagged facts under a namespace subtree.
 
-        Returns entities with hex codes and all facts whose subject is
-        an entity in the namespace (or descendants).
+        Returns entities assigned to the namespace (or descendants) with hex
+        codes, plus all facts tagged with that namespace or any descendant.
 
         Args:
             namespace_code: Root namespace code
@@ -1675,17 +1687,16 @@ class GraphRepository:
 
         entities = []
         all_facts = []
-        seen_fact_uuids: set[str] = set()
 
-        for row in result:
-            entity = self._parse_entity(row["e"])
-            entities.append(entity)
+        if result:
+            row = result[0]
+            for e_data in row.get("entities", []):
+                if e_data and e_data.get("uuid"):
+                    entities.append(self._parse_entity(e_data))
 
             for f_data in row.get("facts", []):
                 if f_data and f_data.get("uuid"):
-                    if f_data["uuid"] not in seen_fact_uuids:
-                        seen_fact_uuids.add(f_data["uuid"])
-                        all_facts.append(self._parse_fact(f_data))
+                    all_facts.append(self._parse_fact(f_data))
 
         return {
             "entities": entities,
@@ -1743,6 +1754,7 @@ class GraphRepository:
             bound=data.get("bound", False),
             subject_entity_uuid=data.get("subject_entity_uuid"),
             object_entity_uuid=data.get("object_entity_uuid"),
+            namespace=data.get("namespace"),
             updated_at=data.get("updated_at"),
         )
 

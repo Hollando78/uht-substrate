@@ -1713,6 +1713,7 @@ async def store_fact(
     predicate: str,
     object_value: str,
     user_id: str = "default",
+    namespace: str = "",
 ) -> dict[str, Any]:
     """
     Store a fact in the knowledge graph for later use.
@@ -1725,6 +1726,7 @@ async def store_fact(
         predicate: Relationship/predicate
         object_value: Object of the fact
         user_id: User identifier
+        namespace: Optional namespace tag (e.g. "CLAUDE:projects")
 
     Returns:
         Confirmation of stored fact
@@ -1748,6 +1750,7 @@ async def store_fact(
             confidence=1.0,
             source="asserted",
             user_id=user_id,
+            namespace=namespace or None,
         )
     except ValueError as e:
         return {"error": str(e)}
@@ -1763,6 +1766,7 @@ async def store_fact(
         "bound": fact.bound,
         "subject_entity_uuid": fact.subject_entity_uuid,
         "object_entity_uuid": fact.object_entity_uuid,
+        "namespace": fact.namespace,
         "stored": not is_duplicate,
         "duplicate": is_duplicate,
     }
@@ -1782,7 +1786,8 @@ async def store_facts_bulk(
     Args:
         facts: Array of fact objects, each with keys:
                subject (required), predicate (required),
-               object_value (required), user_id (optional, defaults to "default")
+               object_value (required), user_id (optional, defaults to "default"),
+               namespace (optional)
 
     Returns:
         Array of results in the same order as input
@@ -1805,6 +1810,7 @@ async def store_facts_bulk(
         predicate = item.get("predicate", "")
         object_value = item.get("object_value", "")
         user_id = item.get("user_id", "default")
+        ns = item.get("namespace", "")
 
         if not subject or not predicate or not object_value:
             results.append({
@@ -1830,6 +1836,7 @@ async def store_facts_bulk(
                 confidence=1.0,
                 source="asserted",
                 user_id=user_id,
+                namespace=ns or None,
             )
             is_duplicate = getattr(fact, "_is_duplicate", False)
             results.append({
@@ -1840,6 +1847,7 @@ async def store_facts_bulk(
                 "object": fact.object,
                 "category": fact.category,
                 "bound": fact.bound,
+                "namespace": fact.namespace,
                 "stored": not is_duplicate,
                 "duplicate": is_duplicate,
             })
@@ -1862,6 +1870,7 @@ async def upsert_fact(
     predicate: str,
     object_value: str,
     user_id: str = "default",
+    namespace: str = "",
 ) -> dict[str, Any]:
     """
     Upsert a fact: match on (subject, predicate, user_id).
@@ -1875,6 +1884,7 @@ async def upsert_fact(
         predicate: Relationship/predicate
         object_value: Object of the fact
         user_id: User identifier
+        namespace: Optional namespace tag (e.g. "CLAUDE:projects")
 
     Returns:
         Fact details with created/updated flags
@@ -1898,6 +1908,7 @@ async def upsert_fact(
             confidence=1.0,
             source="asserted",
             user_id=user_id,
+            namespace=namespace or None,
         )
     except ValueError as e:
         return {"error": str(e)}
@@ -1912,6 +1923,7 @@ async def upsert_fact(
         "bound": fact.bound,
         "subject_entity_uuid": fact.subject_entity_uuid,
         "object_entity_uuid": fact.object_entity_uuid,
+        "namespace": fact.namespace,
         "created": was_created,
         "updated": not was_created,
     }
@@ -2143,13 +2155,11 @@ async def get_namespace_context(
         user_id=user_id or None,
     )
 
-    # Get namespace tree
-    namespaces = await ctx.graph.list_namespaces(
+    # Get namespace tree (include_descendants with *0.. already includes root)
+    all_namespaces = await ctx.graph.list_namespaces(
         parent_code=namespace,
         include_descendants=True,
     )
-    # Include the root namespace itself
-    all_namespaces = [ns] + namespaces
 
     return {
         "namespace": namespace,
@@ -2181,6 +2191,7 @@ async def get_namespace_context(
                 "confidence": f.confidence,
                 "source": f.source,
                 "category": f.category,
+                "namespace": f.namespace,
                 "bound": f.bound,
                 "created_at": str(f.created_at),
             }
