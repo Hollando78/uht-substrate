@@ -2905,7 +2905,25 @@ async def api_root():
             "POST /batch-compare": "Compare entity against multiple candidates",
             "POST /search": "Semantic search for similar entities",
             "POST /disambiguate": "Get word senses for polysemous terms",
+            "POST /map-properties-to-traits": "Map properties to UHT trait bits",
+            "POST /semantic-triangle": "Get Ogden-Richards semantic triangle",
             "GET /entities": "List entities in local graph",
+            "GET /search/traits": "Search entities by trait pattern",
+            "POST /entities/delete": "Delete entity from local graph",
+            "POST /entities/infer": "Infer properties from classification",
+            "POST /entities/explore": "Explore semantic neighborhood",
+            "POST /entities/find-similar": "Find similar entities",
+            "POST /namespaces/create": "Create a namespace",
+            "POST /namespaces/list": "List namespaces",
+            "POST /namespaces/assign": "Assign entity to namespace",
+            "POST /facts/store": "Store a fact",
+            "POST /facts/store-bulk": "Store multiple facts",
+            "POST /facts/upsert": "Upsert a fact",
+            "POST /facts/query": "Query facts",
+            "POST /facts/update": "Update a fact",
+            "POST /facts/delete": "Delete a fact",
+            "POST /facts/user-context": "Get user context",
+            "POST /facts/namespace-context": "Get namespace context",
         },
         "mcp_endpoint": "/mcp (for MCP clients)",
     }
@@ -3054,6 +3072,236 @@ async def api_search_by_traits(
         ethically_significant=ethically_significant,
         limit=limit,
     )
+
+
+# --- Entity management endpoints ---
+
+
+class DeleteEntityRequest(BaseModel):
+    """Request model for delete entity endpoint."""
+    name: str
+    source: str = "local"
+
+
+class InferPropertiesRequest(BaseModel):
+    """Request model for infer properties endpoint."""
+    entity: str
+
+
+class ExploreNeighborhoodRequest(BaseModel):
+    """Request model for explore neighborhood endpoint."""
+    entity: str
+    metric: str = "embedding"
+    limit: int = 10
+    min_similarity: float = 0.3
+
+
+class FindSimilarRequest(BaseModel):
+    """Request model for find similar entities endpoint."""
+    entity: str
+    limit: int = 5
+    min_shared_traits: int = 20
+
+
+@rest_api.post("/entities/delete")
+async def api_delete_entity(request: DeleteEntityRequest):
+    """Delete an entity from the local knowledge graph."""
+    return await delete_entity(request.name, request.source)
+
+
+@rest_api.post("/entities/infer")
+async def api_infer_properties(request: InferPropertiesRequest):
+    """Infer properties of an entity from its classification."""
+    return await infer_properties(request.entity)
+
+
+@rest_api.post("/entities/explore")
+async def api_explore_neighborhood(request: ExploreNeighborhoodRequest):
+    """Explore the semantic neighborhood of an entity."""
+    return await explore_neighborhood(
+        request.entity, request.metric, request.limit, request.min_similarity,
+    )
+
+
+@rest_api.post("/entities/find-similar")
+async def api_find_similar(request: FindSimilarRequest):
+    """Find entities similar to the given entity."""
+    return await find_similar_entities(request.entity, request.limit, request.min_shared_traits)
+
+
+# --- Semantic analysis endpoints ---
+
+
+class SemanticTriangleRequest(BaseModel):
+    """Request model for semantic triangle endpoint."""
+    text: str
+
+
+@rest_api.post("/semantic-triangle")
+async def api_semantic_triangle(request: SemanticTriangleRequest):
+    """Get the Ogden-Richards semantic triangle for a term."""
+    return await get_semantic_triangle(request.text)
+
+
+# --- Namespace endpoints ---
+
+
+class CreateNamespaceRequest(BaseModel):
+    """Request model for create namespace endpoint."""
+    code: str
+    name: str
+    description: str = ""
+
+
+class ListNamespacesRequest(BaseModel):
+    """Request model for list namespaces endpoint."""
+    parent: str = ""
+    include_descendants: bool = False
+
+
+class AssignNamespaceRequest(BaseModel):
+    """Request model for assign to namespace endpoint."""
+    entity_name: str
+    namespace: str
+    primary: bool = True
+
+
+@rest_api.post("/namespaces/create")
+async def api_create_namespace(request: CreateNamespaceRequest):
+    """Create a new namespace."""
+    return await create_namespace(request.code, request.name, request.description)
+
+
+@rest_api.post("/namespaces/list")
+async def api_list_namespaces(request: ListNamespacesRequest):
+    """List namespaces."""
+    return await list_namespaces(request.parent, request.include_descendants)
+
+
+@rest_api.post("/namespaces/assign")
+async def api_assign_namespace(request: AssignNamespaceRequest):
+    """Assign an entity to a namespace."""
+    return await assign_to_namespace(request.entity_name, request.namespace, request.primary)
+
+
+# --- Fact endpoints ---
+
+
+class StoreFactRequest(BaseModel):
+    """Request model for store fact endpoint."""
+    subject: str
+    predicate: str
+    object_value: str
+    user_id: str = "default"
+    namespace: str = ""
+
+
+class StoreFactsBulkRequest(BaseModel):
+    """Request model for store facts bulk endpoint."""
+    facts: list[dict[str, str]]
+
+
+class UpsertFactRequest(BaseModel):
+    """Request model for upsert fact endpoint."""
+    subject: str
+    predicate: str
+    object_value: str
+    user_id: str = "default"
+    namespace: str = ""
+
+
+class QueryFactsRequest(BaseModel):
+    """Request model for query facts endpoint."""
+    subject: str = ""
+    object_value: str = ""
+    predicate: str = ""
+    category: str = ""
+    user_id: str = ""
+    namespace: str = ""
+    limit: int = 20
+
+
+class UpdateFactRequest(BaseModel):
+    """Request model for update fact endpoint."""
+    fact_id: str
+    subject: str = ""
+    predicate: str = ""
+    object_value: str = ""
+
+
+class DeleteFactRequest(BaseModel):
+    """Request model for delete fact endpoint."""
+    fact_id: str
+
+
+class UserContextRequest(BaseModel):
+    """Request model for get user context endpoint."""
+    user_id: str = "default"
+
+
+class NamespaceContextRequest(BaseModel):
+    """Request model for get namespace context endpoint."""
+    namespace: str
+    user_id: str = ""
+
+
+@rest_api.post("/facts/store")
+async def api_store_fact(request: StoreFactRequest):
+    """Store a fact in the knowledge graph."""
+    return await store_fact(
+        request.subject, request.predicate, request.object_value,
+        request.user_id, request.namespace,
+    )
+
+
+@rest_api.post("/facts/store-bulk")
+async def api_store_facts_bulk(request: StoreFactsBulkRequest):
+    """Store multiple facts in a single call."""
+    return await store_facts_bulk(request.facts)
+
+
+@rest_api.post("/facts/upsert")
+async def api_upsert_fact(request: UpsertFactRequest):
+    """Upsert a fact (create or update)."""
+    return await upsert_fact(
+        request.subject, request.predicate, request.object_value,
+        request.user_id, request.namespace,
+    )
+
+
+@rest_api.post("/facts/query")
+async def api_query_facts(request: QueryFactsRequest):
+    """Query facts with flexible filters."""
+    return await query_facts(
+        request.subject, request.object_value, request.predicate,
+        request.category, request.user_id, request.namespace, request.limit,
+    )
+
+
+@rest_api.post("/facts/update")
+async def api_update_fact(request: UpdateFactRequest):
+    """Update an existing fact."""
+    return await update_fact(
+        request.fact_id, request.subject, request.predicate, request.object_value,
+    )
+
+
+@rest_api.post("/facts/delete")
+async def api_delete_fact(request: DeleteFactRequest):
+    """Delete a fact from the knowledge graph."""
+    return await delete_fact(request.fact_id)
+
+
+@rest_api.post("/facts/user-context")
+async def api_user_context(request: UserContextRequest):
+    """Get stored facts and preferences for a user."""
+    return await get_user_context(request.user_id)
+
+
+@rest_api.post("/facts/namespace-context")
+async def api_namespace_context(request: NamespaceContextRequest):
+    """Get all entities and facts under a namespace."""
+    return await get_namespace_context(request.namespace, request.user_id)
 
 
 # =============================================================================
