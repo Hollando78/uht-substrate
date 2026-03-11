@@ -110,8 +110,15 @@ class UHTClient:
         if context:
             entity_obj["description"] = context
         payload: dict[str, object] = {"entity": entity_obj}
+        if force_refresh:
+            payload["use_cache"] = False
 
-        logger.info("Classifying entity", entity=entity, has_context=bool(context))
+        logger.info(
+            "Classifying entity",
+            entity=entity,
+            has_context=bool(context),
+            use_cache=not force_refresh,
+        )
         response = await self._client.post("/classify/", json=payload)
         response.raise_for_status()
 

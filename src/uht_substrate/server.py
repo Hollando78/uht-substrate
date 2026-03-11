@@ -490,6 +490,29 @@ async def _resolve_classification(
         namespace=namespace,
     )
 
+    # Guard: if Factory returned empty traits, derive from hex code
+    if not result.traits and result.hex_code != "00000000":
+        from uht_substrate.uht_client.models import TraitValue
+        binary = result.binary or _hex_to_binary(result.hex_code)
+        result = ClassificationResult(
+            uuid=result.uuid,
+            name=result.name,
+            hex_code=result.hex_code,
+            binary=binary,
+            traits=[
+                TraitValue(
+                    bit_position=bit,
+                    name=TRAIT_NAMES.get(bit, f"Bit {bit}"),
+                    present=binary[bit - 1] == "1",
+                    confidence=1.0 if binary[bit - 1] == "1" else 0.0,
+                    justification=None,
+                )
+                for bit in range(1, 33)
+            ],
+            created_at=result.created_at,
+        )
+        logger.debug("Derived traits from hex code (Factory returned empty traits)", entity=entity_name)
+
     # Store in local graph for future lookups
     if ctx.graph:
         await ctx.graph.upsert_entity(
@@ -591,45 +614,25 @@ async def classify_entity(
                     context = f"{prior_context} {context}".strip() if context else prior_context
             except Exception as e:
                 log.warning("Semantic priors failed, continuing without", error=str(e))
-        # Determine the entity name to send to Factory API
-        # When force_refresh + namespace, use "entity@namespace" format to bypass
-        # Factory's corpus cache for polysemous terms
-        classify_name = entity
-        if force_refresh and namespace:
-            classify_name = f"{entity}@{namespace}"
-            log.info(
-                "Using namespace-qualified name for fresh classification",
-                original=entity,
-                qualified=classify_name,
-            )
-
-        # Resolve classification: local graph first, then API
+        # Resolve classification: local graph first, then Factory API
         result = await _resolve_classification(
-            entity_name=classify_name,
+            entity_name=entity,
             context=context if context else None,
             force_refresh=force_refresh,
             namespace=namespace if namespace else None,
         )
 
-        # If we used a namespace-qualified name, re-store under original name
-        if classify_name != entity and ctx.graph:
-            from uht_substrate.uht_client.models import ClassificationResult
-            store_result = ClassificationResult(
-                uuid=result.uuid,
-                name=entity,
-                hex_code=result.hex_code,
-                binary=result.binary,
-                traits=result.traits,
-                created_at=result.created_at,
-            )
-            await ctx.graph.upsert_entity(
-                store_result,
-                source="uht_factory",
-                description=context or None,
-                namespace=namespace or None,
+        # Validate: if fresh classification returned all-zero, log and warn
+        if result.hex_code == "00000000" and force_refresh:
+            log.warning(
+                "Fresh classification returned 00000000 — Factory may have failed",
+                entity=entity,
+                has_context=bool(context),
+                trait_count=len(result.traits),
             )
 
-            # Retroactively bind any unbound facts referencing this entity
+        # Bind any unbound facts referencing this entity
+        if ctx.graph:
             await ctx.graph.bind_pending_facts_for_entity(entity)
 
         # Get inferred properties from trait axioms
