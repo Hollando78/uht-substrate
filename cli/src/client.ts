@@ -80,17 +80,27 @@ export class UHTClient {
     return this.request("GET", "/traits");
   }
 
+  async traitPrompts(opts?: { entity_name?: string; entity_description?: string; bit?: number }) {
+    const query: Record<string, string> = {};
+    if (opts?.entity_name) query["entity_name"] = opts.entity_name;
+    if (opts?.entity_description) query["entity_description"] = opts.entity_description;
+    if (opts?.bit) query["bit"] = String(opts.bit);
+    return this.request("GET", "/traits/prompts", undefined, query);
+  }
+
   async patterns() {
     return this.request("GET", "/patterns");
   }
 
   // --- Classification ---
 
-  async classify(entity: string, opts?: { context?: string; use_semantic_priors?: boolean }) {
+  async classify(entity: string, opts?: { context?: string; use_semantic_priors?: boolean; force_refresh?: boolean; namespace?: string }) {
     return this.request("POST", "/classify", {
       entity,
       context: opts?.context ?? "",
       use_semantic_priors: opts?.use_semantic_priors ?? false,
+      force_refresh: opts?.force_refresh ?? false,
+      namespace: opts?.namespace ?? "",
     });
   }
 
@@ -131,6 +141,13 @@ export class UHTClient {
     if (opts?.limit) query["limit"] = String(opts.limit);
     if (opts?.offset) query["offset"] = String(opts.offset);
     return this.request("GET", "/entities", undefined, query);
+  }
+
+  async getEntity(opts: { name?: string; uuid?: string }) {
+    const query: Record<string, string> = {};
+    if (opts.name) query["name"] = opts.name;
+    if (opts.uuid) query["uuid"] = opts.uuid;
+    return this.request("GET", "/entities/get", undefined, query);
   }
 
   async deleteEntity(name: string, source?: string) {

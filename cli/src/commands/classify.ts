@@ -11,13 +11,17 @@ export function registerClassifyCommands(
     .command("classify")
     .description("Classify an entity and get its hex code")
     .argument("<entity>", "Entity to classify")
-    .option("-c, --context <context>", "Additional context for classification")
+    .option("-c, --context <context>", "Additional context/description to guide classification")
     .option("--semantic-priors", "Use semantic prior inference", false)
-    .action(async (entity: string, opts: { context?: string; semanticPriors: boolean }) => {
+    .option("-f, --force-refresh", "Skip cache and force fresh classification", false)
+    .option("-n, --namespace <ns>", "Namespace code (e.g. 'SE', 'SE:aerospace')")
+    .action(async (entity: string, opts: { context?: string; semanticPriors: boolean; forceRefresh: boolean; namespace?: string }) => {
       output(
         await getClient().classify(entity, {
           context: opts.context,
           use_semantic_priors: opts.semanticPriors,
+          force_refresh: opts.forceRefresh,
+          namespace: opts.namespace,
         }),
         getFormat(),
       );

@@ -38,11 +38,16 @@ export UHT_TOKEN=your-token
 ```bash
 # Classify an entity — get its 8-char hex code and 32 trait bits
 uht-substrate classify hammer
-uht-substrate classify "cognitive dissonance" --context psychology --format pretty
+uht-substrate classify "cognitive dissonance" -c "a psychology concept" --format pretty
+
+# Reclassify with a rich description (skips cache)
+uht-substrate classify "epistemic humility" \
+  -c "the intellectual virtue of recognizing the limits of one's knowledge" \
+  --force-refresh
 
 # Compare two entities — Jaccard similarity, shared/unique traits
 uht-substrate compare hammer screwdriver --format pretty
-uht-substrate compare hammer democracy --format pretty
+uht-substrate compare "Account (grounds)" democracy --format pretty
 
 # Batch compare — rank candidates by similarity
 uht-substrate batch-compare hammer wrench screwdriver pliers saw
@@ -63,7 +68,7 @@ uht-substrate infer hammer
 
 | Command | Description |
 |---------|-------------|
-| `classify <entity>` | Classify an entity and get its hex code |
+| `classify <entity>` | Classify an entity and get its hex code (`-c`, `-f`, `-n`) |
 | `infer <entity>` | Infer properties from classification |
 | `compare <a> <b>` | Compare two entities |
 | `batch-compare <entity> <candidates...>` | Compare against multiple, ranked by Jaccard |
@@ -76,7 +81,8 @@ uht-substrate infer hammer
 
 | Command | Description |
 |---------|-------------|
-| `entities list` | List entities in the knowledge graph |
+| `entities list` | List entities (with uuid, description) |
+| `entities get` | Get a single entity by `--name` or `--uuid` |
 | `entities delete <name>` | Delete an entity from the local graph |
 | `entities find-similar <entity>` | Find similar entities (experimental) |
 | `entities explore <entity>` | Explore semantic neighborhood (experimental) |
@@ -133,7 +139,8 @@ uht-substrate namespaces list --parent SE --descendants
 | Command | Description |
 |---------|-------------|
 | `info` | System information and overview |
-| `traits` | All 32 trait definitions |
+| `traits` | All 32 trait definitions (with version) |
+| `trait-prompts` | Classifier prompts sent to the LLM (edge cases, examples) |
 | `patterns` | Reasoning patterns for tool orchestration |
 
 ### Configuration

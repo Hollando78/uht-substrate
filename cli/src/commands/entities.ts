@@ -42,6 +42,19 @@ export function registerEntityCommands(
     });
 
   entities
+    .command("get")
+    .description("Get a single entity by name or UUID")
+    .option("-n, --name <name>", "Entity name (case-insensitive)")
+    .option("-u, --uuid <uuid>", "Entity UUID")
+    .action(async (opts: { name?: string; uuid?: string }) => {
+      if (!opts.name && !opts.uuid) {
+        console.error("Error: provide --name or --uuid");
+        process.exit(1);
+      }
+      output(await getClient().getEntity(opts), getFormat());
+    });
+
+  entities
     .command("delete")
     .description("Delete an entity from the local graph")
     .argument("<name>", "Exact entity name")

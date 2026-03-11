@@ -299,14 +299,14 @@ class UHTClient:
     # Trait Endpoints
     # =========================================================================
 
-    async def get_traits(self) -> list[TraitDefinition]:
+    async def get_traits(self) -> tuple[list[TraitDefinition], str]:
         """
         Get all 32 canonical trait definitions.
 
         GET /traits/
 
         Returns:
-            List of all trait definitions
+            Tuple of (trait definitions list, version string)
         """
         cache_key = "traits:all"
         cached = self._cache.get(cache_key)
@@ -317,6 +317,7 @@ class UHTClient:
         response.raise_for_status()
 
         data = response.json()
+        version = data.get("version", "")
 
         # API returns traits nested under "layers" dict
         # Flatten into a single list
@@ -331,10 +332,11 @@ class UHTClient:
 
         traits = [TraitDefinition.model_validate(t) for t in traits_data]
 
+        result = (traits, version)
         # Cache for 24 hours since traits don't change often
-        self._cache.set(cache_key, traits, ttl=86400)
+        self._cache.set(cache_key, result, ttl=86400)
 
-        return traits
+        return result
 
     async def get_trait(self, bit: int) -> TraitDefinition:
         """

@@ -1,7 +1,7 @@
 {
   "name": "uht-substrate",
-  "version": "0.3.0",
-  "description": "CLI for the Universal Hex Taxonomy Substrate API",
+  "version": "0.4.5",
+  "description": "CLI for the Universal Hex Taxonomy (UHT) Substrate — classify entities into 32-bit hex codes, compare semantic similarity, manage a knowledge graph, and connect via MCP",
   "bin": {
     "uht-substrate": "./dist/index.js"
   },
@@ -25,7 +25,10 @@
     "semantic",
     "hex",
     "cli",
-    "classification"
+    "classification",
+    "mcp",
+    "knowledge-graph",
+    "ontology"
   ],
   "license": "MIT",
   "dependencies": {

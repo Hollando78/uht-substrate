@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { Command } from "commander";
 import { ApiError, UHTClient } from "./client.js";
 import { resolveConfig, type CliGlobalOpts } from "./config.js";
@@ -13,12 +16,15 @@ import { registerInfoCommands } from "./commands/info.js";
 import { registerConfigCommands } from "./commands/config.js";
 import { registerImpactCommand } from "./commands/impact.js";
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+
 const program = new Command();
 
 program
   .name("uht-substrate")
   .description("CLI for the Universal Hex Taxonomy Substrate API")
-  .version("0.3.0")
+  .version(pkg.version)
   .option("--api-url <url>", "API base URL")
   .option("--token <token>", "Bearer token for authentication")
   .option("--format <fmt>", "Output format: json or pretty", "json")

@@ -72,13 +72,31 @@ function prettyPrint(data: unknown): void {
     return;
   }
 
+  // Traits definitions
+  if ("total_traits" in obj && "layers" in obj) {
+    printTraits(obj);
+    return;
+  }
+
+  // Trait prompts (full set)
+  if ("prompt_spec_version" in obj && "prompts" in obj) {
+    printTraitPrompts(obj);
+    return;
+  }
+
+  // Single trait prompt
+  if ("system_prompt" in obj && "trait_name" in obj) {
+    printSinglePrompt(obj);
+    return;
+  }
+
   // Wrap with results/entities/facts arrays
   if ("results" in obj && Array.isArray(obj.results)) {
     prettyPrint(obj.results);
     return;
   }
   if ("entities" in obj && Array.isArray(obj.entities)) {
-    printTable(obj.entities as Record<string, unknown>[]);
+    printEntitiesTable(obj);
     return;
   }
   if ("facts" in obj && Array.isArray(obj.facts)) {
@@ -222,6 +240,88 @@ function printFactsTable(rows: Record<string, unknown>[]): void {
     const meta = [f.category, f.namespace, f.user_id].filter(Boolean).join(" | ");
     if (meta) console.log(`  ${dim(meta)}`);
     if (f.id) console.log(`  ${dim(String(f.id))}`);
+  }
+}
+
+function printTraits(obj: Record<string, unknown>): void {
+  if (obj.version) console.log(`${bold("Trait version:")} ${cyan(String(obj.version))}`);
+  console.log(`${bold("Total traits:")} ${obj.total_traits}  ${dim(String(obj.encoding ?? ""))}`);
+  console.log();
+
+  const layers = obj.layers as Record<string, Record<string, unknown>> | undefined;
+  if (!layers) return;
+
+  const layerColors: Record<string, (s: string) => string> = {
+    physical: red,
+    functional: yellow,
+    abstract: cyan,
+    social: green,
+  };
+
+  for (const [layerKey, layer] of Object.entries(layers)) {
+    const colorKey = Object.keys(layerColors).find((k) => layerKey.toLowerCase().includes(k));
+    const colorFn = colorKey ? layerColors[colorKey]! : bold;
+    console.log(colorFn(bold(layerKey)));
+    if (layer.description) console.log(`  ${dim(String(layer.description))}`);
+
+    const traits = layer.traits as Array<Record<string, unknown>> | undefined;
+    if (traits) {
+      for (const t of traits) {
+        const bit = String(t.bit ?? "").padStart(2);
+        console.log(`  ${dim(bit)}  ${bold(String(t.name ?? ""))} ${dim("—")} ${String(t.short_description ?? "")}`);
+      }
+    }
+    console.log();
+  }
+}
+
+function printTraitPrompts(obj: Record<string, unknown>): void {
+  console.log(`${bold("Prompt spec version:")} ${cyan(String(obj.prompt_spec_version ?? "?"))}`);
+  console.log(`${bold("Model:")} ${String(obj.model ?? "?")}  ${bold("Temperature:")} ${String(obj.temperature ?? "?")}`);
+  console.log(`${bold("Prompts:")} ${String(obj.count ?? "?")}`);
+  console.log();
+
+  const prompts = obj.prompts as Array<Record<string, unknown>> | undefined;
+  if (prompts) {
+    for (const p of prompts) {
+      console.log(`  ${dim(String(p.bit ?? "").padStart(2))}  ${bold(String(p.trait_name ?? ""))} ${dim(`[${p.layer}]`)}`);
+    }
+  }
+  console.log();
+  console.log(dim("Use --bit <n> to see the full prompt for a specific trait."));
+}
+
+function printSinglePrompt(obj: Record<string, unknown>): void {
+  console.log(`${bold(String(obj.trait_name ?? ""))} ${dim(`[bit ${obj.bit}, ${obj.layer}]`)}`);
+  console.log();
+  console.log(String(obj.system_prompt ?? ""));
+  if (obj.user_prompt) {
+    console.log();
+    console.log(bold("User prompt:"));
+    console.log(String(obj.user_prompt));
+  }
+}
+
+function printEntitiesTable(obj: Record<string, unknown>): void {
+  const total = obj.total ?? "?";
+  const offset = obj.offset ?? 0;
+  const count = obj.count ?? 0;
+  const hasMore = obj.has_more ?? false;
+  console.log(`${bold("Entities:")} ${count} of ${total}${hasMore ? dim(` (offset ${offset}, more available)`) : ""}`);
+  console.log();
+
+  const entities = obj.entities as Record<string, unknown>[] | undefined;
+  if (!entities || !entities.length) {
+    console.log(dim("(no results)"));
+    return;
+  }
+
+  for (const e of entities) {
+    const hex = cyan(String(e.hex_code ?? ""));
+    const name = bold(String(e.name ?? ""));
+    const uuid = dim(String(e.uuid ?? "").slice(0, 8));
+    console.log(`  ${uuid}  ${hex}  ${name}`);
+    if (e.description) console.log(`           ${dim(String(e.description).slice(0, 100))}`);
   }
 }
 

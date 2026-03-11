@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UHT Substrate</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;line-height:1.6}
+  a{color:#6ee7b7;text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.hex{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;
+    color:#6ee7b7;background:#1a1a2e;padding:.15em .4em;border-radius:4px;font-size:.9em}
+
+  /* Layout */
+  .wrap{max-width:960px;margin:0 auto;padding:2rem 1.5rem}
+
+  /* Hero */
+  .hero{text-align:center;padding:3rem 0 2rem}
+  h1{font-size:2.6rem;font-weight:700;letter-spacing:-.02em}
+  h1 span{color:#6ee7b7}
+  .subtitle{color:#9ca3af;font-size:1.15rem;margin-top:.4rem}
+
+  /* Stats bar */
+  .stats{display:flex;justify-content:center;gap:2.5rem;margin:2rem 0;flex-wrap:wrap}
+  .stat{text-align:center}
+  .stat-val{font-size:1.8rem;font-weight:700;color:#6ee7b7}
+  .stat-label{font-size:.8rem;color:#6b7280;text-transform:uppercase;letter-spacing:.08em}
+
+  /* Section */
+  section{margin:2.5rem 0}
+  h2{font-size:1.3rem;font-weight:600;margin-bottom:1rem;color:#e0e0e0}
+  h2 span{color:#6ee7b7}
+
+  /* Trait grid */
+  .trait-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}
+  @media(max-width:700px){.trait-grid{grid-template-columns:repeat(2,1fr)}}
+  .layer{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:1rem}
+  .layer-name{font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;margin-bottom:.6rem;font-weight:600}
+  .layer-physical .layer-name{color:#f87171}
+  .layer-functional .layer-name{color:#fbbf24}
+  .layer-abstract .layer-name{color:#818cf8}
+  .layer-social .layer-name{color:#34d399}
+  .trait{font-size:.78rem;color:#9ca3af;padding:.2rem 0;display:flex;gap:.4rem;align-items:baseline}
+  .trait .bit{color:#4b5563;font-size:.7rem;min-width:1.2rem}
+
+  /* Classify widget */
+  .classify-box{background:#111118;border:1px solid #1e1e2e;border-radius:8px;padding:1.5rem}
+  .input-row{display:flex;gap:.5rem}
+  .input-row input{flex:1;background:#0a0a0f;border:1px solid #2a2a3e;border-radius:6px;
+    padding:.6rem 1rem;color:#e0e0e0;font-size:1rem;font-family:inherit;outline:none}
+  .input-row input:focus{border-color:#6ee7b7}
+  .input-row button{background:#6ee7b7;color:#0a0a0f;border:none;border-radius:6px;
+    padding:.6rem 1.4rem;font-weight:600;cursor:pointer;font-size:.95rem;white-space:nowrap}
+  .input-row button:hover{background:#5dd6a8}
+  .input-row button:disabled{opacity:.5;cursor:wait}
+  .result{margin-top:1rem;display:none}
+  .result.show{display:block}
+  .result-hex{font-size:2rem;font-weight:700;color:#6ee7b7;font-family:'SF Mono',SFMono-Regular,Consolas,monospace;letter-spacing:.1em}
+  .result-binary{font-size:.8rem;color:#6b7280;font-family:monospace;margin-top:.2rem;word-break:break-all}
+  .result-traits{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.8rem}
+  .result-trait{font-size:.75rem;padding:.25rem .6rem;border-radius:4px;border:1px solid #2a2a3e}
+  .result-trait.on{background:#0f2a1f;border-color:#22543d;color:#6ee7b7}
+  .result-trait.off{color:#4b5563;border-color:#1a1a2e}
+  .result-error{color:#f87171;font-size:.9rem;margin-top:.5rem}
+
+  /* Sample entities */
+  .entities{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.75rem}
+  .entity{background:#111118;border:1px solid #1e1e2e;border-radius:6px;padding:.75rem 1rem;
+    display:flex;justify-content:space-between;align-items:center}
+  .entity-name{font-size:.9rem;font-weight:500}
+  .entity-hex{font-family:monospace;color:#6ee7b7;font-size:.85rem;letter-spacing:.05em}
+  .entity-bits{display:flex;gap:1px;margin-left:.75rem}
+  .entity-bit{width:4px;height:12px;border-radius:1px}
+  .entity-bit.on{background:#6ee7b7}
+  .entity-bit.off{background:#1e1e2e}
+
+  /* Links */
+  .links{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-top:2rem;padding-bottom:2rem}
+  .links a{border:1px solid #2a2a3e;padding:.5rem 1.2rem;border-radius:6px;transition:all .15s;
+    text-decoration:none}
+  .links a:hover{background:#1a1a2e;border-color:#6ee7b7}
+
+  /* Encoding explainer */
+  .encoding{text-align:center;color:#6b7280;font-size:.85rem;margin:1.5rem 0}
+  .encoding strong{color:#9ca3af}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>UHT <span>Substrate</span></h1>
+    <p class="subtitle">Universal Hex Taxonomy &mdash; Semantic Reasoning Engine</p>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-val" id="entity-count">&mdash;</div>
+      <div class="stat-label">Entities Classified</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">32</div>
+      <div class="stat-label">Binary Traits</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">4</div>
+      <div class="stat-label">Semantic Layers</div>
+    </div>
+    <div class="stat">
+      <div class="stat-val">8</div>
+      <div class="stat-label">Hex Characters</div>
+    </div>
+  </div>
+
+  <p class="encoding">
+    Every entity is evaluated against <strong>32 binary traits</strong> across four layers,
+    producing an <code>8-char hex code</code> &mdash; a universal coordinate for meaning.
+  </p>
+
+  <!-- Classify widget -->
+  <section>
+    <h2>Try it &mdash; <span>classify anything</span></h2>
+    <div class="classify-box">
+      <div class="input-row">
+        <input type="text" id="classify-input" placeholder="e.g. hammer, democracy, bitcoin, love..." autocomplete="off">
+        <button id="classify-btn" onclick="doClassify()">Classify</button>
+      </div>
+      <div class="result" id="classify-result">
+        <div class="result-hex" id="result-hex"></div>
+        <div class="result-binary" id="result-binary"></div>
+        <div class="result-traits" id="result-traits"></div>
+        <div class="result-error" id="result-error"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Trait grid -->
+  <section>
+    <h2>The <span>32 Traits</span></h2>
+    <div class="trait-grid">
+      <div class="layer layer-physical">
+        <div class="layer-name">Physical (bits 1-8)</div>
+        <div class="trait"><span class="bit">1</span> Physical Object</div>
+        <div class="trait"><span class="bit">2</span> Synthetic</div>
+        <div class="trait"><span class="bit">3</span> Biological</div>
+        <div class="trait"><span class="bit">4</span> Powered</div>
+        <div class="trait"><span class="bit">5</span> Structural</div>
+        <div class="trait"><span class="bit">6</span> Observable</div>
+        <div class="trait"><span class="bit">7</span> Physical Medium</div>
+        <div class="trait"><span class="bit">8</span> Active</div>
+      </div>
+      <div class="layer layer-functional">
+        <div class="layer-name">Functional (bits 9-16)</div>
+        <div class="trait"><span class="bit">9</span> Intentionally Designed</div>
+        <div class="trait"><span class="bit">10</span> Outputs Effect</div>
+        <div class="trait"><span class="bit">11</span> Processes Signals</div>
+        <div class="trait"><span class="bit">12</span> State-Transforming</div>
+        <div class="trait"><span class="bit">13</span> Human-Interactive</div>
+        <div class="trait"><span class="bit">14</span> System-Integrated</div>
+        <div class="trait"><span class="bit">15</span> Functionally Autonomous</div>
+        <div class="trait"><span class="bit">16</span> System-Essential</div>
+      </div>
+      <div class="layer layer-abstract">
+        <div class="layer-name">Abstract (bits 17-24)</div>
+        <div class="trait"><span class="bit">17</span> Symbolic</div>
+        <div class="trait"><span class="bit">18</span> Signalling</div>
+        <div class="trait"><span class="bit">19</span> Rule-Governed</div>
+        <div class="trait"><span class="bit">20</span> Compositional</div>
+        <div class="trait"><span class="bit">21</span> Normative</div>
+        <div class="trait"><span class="bit">22</span> Meta</div>
+        <div class="trait"><span class="bit">23</span> Temporal</div>
+        <div class="trait"><span class="bit">24</span> Digital/Virtual</div>
+      </div>
+      <div class="layer layer-social">
+        <div class="layer-name">Social (bits 25-32)</div>
+        <div class="trait"><span class="bit">25</span> Social Construct</div>
+        <div class="trait"><span class="bit">26</span> Institutionally Defined</div>
+        <div class="trait"><span class="bit">27</span> Identity-Linked</div>
+        <div class="trait"><span class="bit">28</span> Regulated</div>
+        <div class="trait"><span class="bit">29</span> Economically Significant</div>
+        <div class="trait"><span class="bit">30</span> Politicised</div>
+        <div class="trait"><span class="bit">31</span> Ritualised</div>
+        <div class="trait"><span class="bit">32</span> Ethically Significant</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Sample entities -->
+  <section>
+    <h2>Recently classified <span>entities</span></h2>
+    <div class="entities" id="entity-list"></div>
+  </section>
+
+  <!-- Links -->
+  <div class="links">
+    <a href="/api/docs">API Docs</a>
+    <a href="/api/">REST API</a>
+    <a href="https://universalhex.org">universalhex.org</a>
+  </div>
+
+</div>
+
+<script>
+const TRAIT_NAMES=[
+  "Physical Object","Synthetic","Biological","Powered","Structural","Observable","Physical Medium","Active",
+  "Intentionally Designed","Outputs Effect","Processes Signals","State-Transforming","Human-Interactive","System-Integrated","Functionally Autonomous","System-Essential",
+  "Symbolic","Signalling","Rule-Governed","Compositional","Normative","Meta","Temporal","Digital/Virtual",
+  "Social Construct","Institutionally Defined","Identity-Linked","Regulated","Economically Significant","Politicised","Ritualised","Ethically Significant"
+];
+
+function hexToBits(hex){
+  return parseInt(hex,16).toString(2).padStart(32,'0').split('').map(Number);
+}
+
+// Load stats and sample entities on page load
+(async function(){
+  try{
+    const r=await fetch('/demo/stats');
+    if(!r.ok)return;
+    const d=await r.json();
+    document.getElementById('entity-count').textContent=d.entity_count.toLocaleString();
+    const el=document.getElementById('entity-list');
+    el.innerHTML='';
+    d.sample_entities.forEach(e=>{
+      const bits=hexToBits(e.hex_code);
+      const bitsHtml=bits.map(b=>`<div class="entity-bit ${b?'on':'off'}"></div>`).join('');
+      el.innerHTML+=`<div class="entity"><span class="entity-name">${esc(e.name)}</span><span style="display:flex;align-items:center"><span class="entity-hex">${esc(e.hex_code)}</span><span class="entity-bits">${bitsHtml}</span></span></div>`;
+    });
+  }catch(e){console.error(e)}
+})();
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+async function doClassify(){
+  const input=document.getElementById('classify-input');
+  const btn=document.getElementById('classify-btn');
+  const result=document.getElementById('classify-result');
+  const entity=input.value.trim();
+  if(!entity)return;
+
+  btn.disabled=true;btn.textContent='Classifying...';
+  document.getElementById('result-error').textContent='';
+  result.classList.add('show');
+
+  try{
+    const r=await fetch('/demo/classify',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({entity})
+    });
+    if(!r.ok){
+      const e=await r.json().catch(()=>({error:'Request failed'}));
+      throw new Error(e.error||'Classification failed');
+    }
+    const d=await r.json();
+    document.getElementById('result-hex').textContent=d.hex_code;
+    document.getElementById('result-binary').textContent=d.binary.replace(/(.{8})/g,'$1 ').trim();
+
+    const traitsEl=document.getElementById('result-traits');
+    traitsEl.innerHTML='';
+    d.traits.forEach((t,i)=>{
+      const span=document.createElement('span');
+      span.className='result-trait '+(t.present?'on':'off');
+      span.textContent=TRAIT_NAMES[i];
+      if(t.present)span.title='Bit '+(i+1)+': ON';
+      traitsEl.appendChild(span);
+    });
+  }catch(e){
+    document.getElementById('result-error').textContent=e.message;
+  }finally{
+    btn.disabled=false;btn.textContent='Classify';
+  }
+}
+
+document.getElementById('classify-input').addEventListener('keydown',e=>{
+  if(e.key==='Enter')doClassify();
+});
+</script>
+</body>
+</html>

@@ -346,7 +346,7 @@ async def _map_properties_to_traits(
     trait_defs: list[Any] = []
     if ctx.uht:
         try:
-            trait_defs = await ctx.uht.get_traits()
+            trait_defs, _ = await ctx.uht.get_traits()
         except Exception:
             pass
 
@@ -776,8 +776,10 @@ async def list_entities(
         total = local_total
         for e in local_entities:
             results.append({
+                "uuid": e.uuid,
                 "name": e.name,
                 "hex_code": e.hex_code,
+                "description": e.description,
                 "source": "local",
                 "created_at": str(e.created_at) if e.created_at else None,
             })
@@ -799,8 +801,10 @@ async def list_entities(
                 # Avoid duplicates from local
                 if not any(r["name"] == e.name for r in results):
                     results.append({
+                        "uuid": e.uuid,
                         "name": e.name,
                         "hex_code": e.hex_code,
+                        "description": e.description,
                         "source": "factory",
                         "created_at": str(e.created_at) if e.created_at else None,
                     })
@@ -821,6 +825,47 @@ async def list_entities(
             "namespace": namespace or None,
             "source": source,
         },
+    }
+
+
+@mcp.tool()
+async def get_entity(
+    name: str = "",
+    uuid: str = "",
+) -> dict[str, Any]:
+    """
+    Get a single entity by name or UUID.
+
+    Returns full entity details including uuid, hex code, description, and traits.
+
+    Args:
+        name: Entity name (case-insensitive)
+        uuid: Entity UUID (takes priority over name if both provided)
+    """
+    if not ctx.graph:
+        return {"error": "Graph not initialized"}
+
+    if not name and not uuid:
+        return {"error": "Provide either name or uuid"}
+
+    entity = None
+    if uuid:
+        entity = await ctx.graph.find_entity_by_uuid(uuid)
+    if not entity and name:
+        entity = await ctx.graph.find_entity_by_name(name)
+
+    if not entity:
+        return {"error": f"Entity not found: {uuid or name}"}
+
+    return {
+        "uuid": entity.uuid,
+        "name": entity.name,
+        "hex_code": entity.hex_code,
+        "binary": entity.binary_code,
+        "description": entity.description,
+        "source": entity.source,
+        "created_at": str(entity.created_at) if entity.created_at else None,
+        "updated_at": str(entity.updated_at) if entity.updated_at else None,
     }
 
 
@@ -1207,67 +1252,64 @@ async def compare_entities(
         similarity: {jaccard_similarity, hamming_distance, shared_traits, traits_a_only, traits_b_only}
         comparison: Human-readable analysis
     """
-    if not ctx.engine:
+    if not ctx.inference:
         return {"error": "Engine not initialized"}
 
-    result = await ctx.engine.reason(
-        query=f"Compare {entity_a} and {entity_b}",
-    )
+    # Classify both entities directly (avoids NLP entity-name extraction
+    # which fails on names with parentheses or special characters)
+    class_a = await _resolve_classification(entity_a)
+    class_b = await _resolve_classification(entity_b)
+    hex_a = class_a.hex_code
+    hex_b = class_b.hex_code
 
-    # Get detailed similarity metrics if we have both hex codes
+    # Get detailed similarity metrics
     similarity_metrics = {}
     trait_diff = {}
     analysis = None
-    if ctx.inference and len(result.hex_codes) >= 2:
-        hex_a = result.hex_codes.get(entity_a)
-        hex_b = result.hex_codes.get(entity_b)
-        if hex_a and hex_b:
-            analysis = ctx.inference.analyze_similarity(hex_a, hex_b, entity_a, entity_b)
-            similarity_metrics = {
-                "hamming_distance": analysis.hamming_distance,
-                "jaccard_similarity": round(analysis.jaccard_similarity, 3),
-                "simple_similarity": round(analysis.similarity_score, 3),
-                "shared_trait_count": len(analysis.shared_traits),
-                "traits_a_only_count": len(analysis.traits_a_only),
-                "traits_b_only_count": len(analysis.traits_b_only),
-            }
+    if hex_a and hex_b:
+        analysis = ctx.inference.analyze_similarity(hex_a, hex_b, entity_a, entity_b)
+        similarity_metrics = {
+            "hamming_distance": analysis.hamming_distance,
+            "jaccard_similarity": round(analysis.jaccard_similarity, 3),
+            "simple_similarity": round(analysis.similarity_score, 3),
+            "shared_trait_count": len(analysis.shared_traits),
+            "traits_a_only_count": len(analysis.traits_a_only),
+            "traits_b_only_count": len(analysis.traits_b_only),
+        }
 
-            # Build justification lookups from classifications (will hit cache)
-            justifications_a: dict[int, str | None] = {}
-            justifications_b: dict[int, str | None] = {}
-            try:
-                class_a = await _resolve_classification(entity_a)
-                class_b = await _resolve_classification(entity_b)
-                justifications_a = {t.bit_position: t.justification for t in class_a.traits}
-                justifications_b = {t.bit_position: t.justification for t in class_b.traits}
-            except Exception:
-                pass  # Graceful fallback — justifications just won't be included
+        # Build justification lookups from already-resolved classifications
+        justifications_a: dict[int, str | None] = {
+            t.bit_position: t.justification for t in class_a.traits
+        } if class_a.traits else {}
+        justifications_b: dict[int, str | None] = {
+            t.bit_position: t.justification for t in class_b.traits
+        } if class_b.traits else {}
 
-            # Include trait names with justifications for detailed analysis
-            trait_diff = {
-                "shared_traits": [
-                    {
-                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
-                        "justification_a": justifications_a.get(b),
-                        "justification_b": justifications_b.get(b),
-                    }
-                    for b in analysis.shared_traits
-                ],
-                "traits_a_only": [
-                    {
-                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
-                        "justification": justifications_a.get(b),
-                    }
-                    for b in analysis.traits_a_only
-                ],
-                "traits_b_only": [
-                    {
-                        "name": TRAIT_NAMES.get(b, f"Bit {b}"),
-                        "justification": justifications_b.get(b),
-                    }
-                    for b in analysis.traits_b_only
-                ],
-            }
+        # Include trait names with justifications for detailed analysis
+        trait_diff = {
+            "shared_traits": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification_a": justifications_a.get(b),
+                    "justification_b": justifications_b.get(b),
+                }
+                for b in analysis.shared_traits
+            ],
+            "traits_a_only": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification": justifications_a.get(b),
+                }
+                for b in analysis.traits_a_only
+            ],
+            "traits_b_only": [
+                {
+                    "name": TRAIT_NAMES.get(b, f"Bit {b}"),
+                    "justification": justifications_b.get(b),
+                }
+                for b in analysis.traits_b_only
+            ],
+        }
 
     # Auto-store SIMILAR_TO computed fact if requested and similarity is high
     stored_fact_id = None
@@ -1298,15 +1340,26 @@ async def compare_entities(
             except Exception as e:
                 logger.warning("Failed to store similarity fact", error=str(e))
 
+    # Build human-readable comparison summary
+    if analysis:
+        j = similarity_metrics.get("jaccard_similarity", 0)
+        shared = similarity_metrics.get("shared_trait_count", 0)
+        comparison = (
+            f"{entity_a} ({hex_a}) vs {entity_b} ({hex_b}): "
+            f"Jaccard {j:.1%}, {shared} shared traits, "
+            f"Hamming distance {analysis.hamming_distance}."
+        )
+    else:
+        comparison = f"Could not compare: {entity_a} ({hex_a}) vs {entity_b} ({hex_b})"
+
     return {
         "entity_a": entity_a,
         "entity_b": entity_b,
-        "hex_codes": result.hex_codes,
+        "hex_codes": {entity_a: hex_a, entity_b: hex_b},
         "similarity": similarity_metrics,
         "trait_diff": trait_diff,
-        "comparison": result.answer,
-        "confidence": result.confidence,
-        "trace_id": result.trace_id,
+        "comparison": comparison,
+        "confidence": 1.0 if analysis else 0.0,
         "stored_fact_id": stored_fact_id,
     }
 
@@ -2477,7 +2530,7 @@ async def get_traits() -> dict[str, Any]:
         return {"error": "UHT client not initialized"}
 
     try:
-        traits = await ctx.uht.get_traits()
+        traits, trait_version = await ctx.uht.get_traits()
 
         # Group by layer
         layers = {
@@ -2489,15 +2542,23 @@ async def get_traits() -> dict[str, Any]:
 
         for trait in traits:
             layer_name = trait.layer.value
-            layers[layer_name].append({
+            entry: dict[str, Any] = {
                 "bit": trait.bit_position,
                 "name": trait.name,
                 "short_description": trait.short_description,
                 "expanded_definition": trait.expanded_definition,
                 "url": trait.url,
-            })
+            }
+            if trait.examples_present:
+                entry["examples_present"] = trait.examples_present
+            if trait.examples_absent:
+                entry["examples_absent"] = trait.examples_absent
+            if trait.classifier_prompt:
+                entry["classifier_prompt"] = trait.classifier_prompt
+            layers[layer_name].append(entry)
 
         return {
+            "version": trait_version,
             "total_traits": 32,
             "encoding": "Each trait = 1 bit. 32 bits = 8 hex characters.",
             "layers": {
@@ -2523,6 +2584,43 @@ async def get_traits() -> dict[str, Any]:
         return {"error": f"Failed to fetch traits: {e}"}
 
 
+@mcp.tool()
+async def get_trait_prompts(
+    entity_name: str = "",
+    entity_description: str = "",
+    bit: int = 0,
+) -> dict[str, Any]:
+    """
+    Get the classifier prompts sent to the LLM for trait evaluation.
+
+    These prompts include detailed classification guidance, edge cases,
+    and examples for each of the 32 traits. Useful for understanding
+    exactly how classifications are made.
+
+    Args:
+        entity_name: Entity name to substitute into prompts (optional)
+        entity_description: Entity description to substitute (optional)
+        bit: If > 0, return only the prompt for this specific trait (1-32)
+    """
+    if not ctx.uht:
+        return {"error": "UHT client not initialized"}
+
+    try:
+        prompts = await ctx.uht.get_trait_prompts(
+            entity_name=entity_name or "{{entity_name}}",
+            entity_description=entity_description or "{{entity_description}}",
+        )
+        if bit and 1 <= bit <= 32:
+            prompt_list = prompts.get("prompts", [])
+            for p in prompt_list:
+                if p.get("bit") == bit:
+                    return p
+            return {"error": f"Prompt for bit {bit} not found"}
+        return prompts
+    except Exception as e:
+        return {"error": f"Failed to fetch trait prompts: {e}"}
+
+
 # =============================================================================
 # Information Resources
 # =============================================================================
@@ -2534,9 +2632,9 @@ async def get_all_traits() -> str:
     if not ctx.uht:
         return "UHT client not initialized"
 
-    traits = await ctx.uht.get_traits()
+    traits, trait_version = await ctx.uht.get_traits()
 
-    lines = ["# UHT Trait Definitions", ""]
+    lines = [f"# UHT Trait Definitions (v{trait_version})" if trait_version else "# UHT Trait Definitions", ""]
     for trait in traits:
         lines.extend([
             f"## Bit {trait.bit_position}: {trait.name}",
@@ -2843,6 +2941,8 @@ class ClassifyRequest(BaseModel):
     entity: str
     context: str = ""
     use_semantic_priors: bool = False
+    force_refresh: bool = False
+    namespace: str = ""
 
 
 class CompareRequest(BaseModel):
@@ -2941,6 +3041,20 @@ async def api_traits():
     return await get_traits()
 
 
+@rest_api.get("/traits/prompts")
+async def api_trait_prompts(
+    entity_name: str = Query(default="", description="Entity name to substitute"),
+    entity_description: str = Query(default="", description="Entity description to substitute"),
+    bit: int = Query(default=0, ge=0, le=32, description="Single trait bit (1-32), or 0 for all"),
+):
+    """Get classifier prompts with edge cases and examples."""
+    return await get_trait_prompts(
+        entity_name=entity_name,
+        entity_description=entity_description,
+        bit=bit,
+    )
+
+
 @rest_api.get("/patterns")
 async def api_patterns():
     """Get reasoning patterns."""
@@ -2951,7 +3065,10 @@ async def api_patterns():
 async def api_classify(request: ClassifyRequest):
     """Classify an entity and get its hex code."""
     return await classify_entity(
-        request.entity, request.context, use_semantic_priors=request.use_semantic_priors,
+        request.entity, request.context,
+        namespace=request.namespace,
+        force_refresh=request.force_refresh,
+        use_semantic_priors=request.use_semantic_priors,
     )
 
 
@@ -2994,6 +3111,15 @@ async def api_list_entities(
 ):
     """List entities in local graph."""
     return await list_entities(hex_pattern, name_contains, "", limit, offset, "both")
+
+
+@rest_api.get("/entities/get")
+async def api_get_entity(
+    name: str = Query(default="", description="Entity name (case-insensitive)"),
+    uuid: str = Query(default="", description="Entity UUID"),
+):
+    """Get a single entity by name or UUID."""
+    return await get_entity(name=name, uuid=uuid)
 
 
 @rest_api.get("/search/traits")
@@ -3309,19 +3435,28 @@ async def api_namespace_context(request: NamespaceContextRequest):
 # =============================================================================
 
 
+def _load_landing_html() -> str:
+    """Load the landing page HTML from the package directory."""
+    from pathlib import Path
+    return (Path(__file__).parent / "landing.html").read_text()
+
+
 def create_combined_app():
     """Create a combined ASGI app with both REST API and MCP server."""
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
-    from starlette.routing import Mount
+    from starlette.responses import HTMLResponse, JSONResponse
+    from starlette.routing import Mount, Route
 
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         """Require Bearer token on all requests when api_key is configured."""
 
         async def dispatch(self, request, call_next):
             if not settings.api_key:
+                return await call_next(request)
+            # Allow landing page and demo endpoints without auth
+            if request.url.path == "/" or request.url.path.startswith("/demo/"):
                 return await call_next(request)
             # Check Authorization header first, then ?token= query param
             auth = request.headers.get("Authorization", "")
@@ -3331,8 +3466,8 @@ def create_combined_app():
                 return await call_next(request)
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
-    # Get the MCP ASGI app
-    mcp_app = mcp.http_app(path="/mcp")
+    # Get the MCP ASGI app (path="/" since we mount at /mcp)
+    mcp_app = mcp.http_app(path="/")
 
     @asynccontextmanager
     async def chained_lifespan(app):
@@ -3347,11 +3482,47 @@ def create_combined_app():
         # Cleanup our resources
         await _shutdown()
 
-    # Create combined app with REST API at /api and MCP at root
+    async def homepage(request):
+        """Serve the landing page at root."""
+        return HTMLResponse(_load_landing_html())
+
+    async def demo_stats(request):
+        """Public endpoint: entity count and sample entities for the landing page."""
+        try:
+            result = await list_entities("", "", "", 20, 0, "both")
+            return JSONResponse({
+                "entity_count": result.get("total", 0),
+                "sample_entities": [
+                    {"name": e["name"], "hex_code": e["hex_code"]}
+                    for e in result.get("entities", [])[:20]
+                ],
+            })
+        except Exception as e:
+            return JSONResponse({"entity_count": 0, "sample_entities": [], "error": str(e)})
+
+    async def demo_classify(request):
+        """Public endpoint: classify a single entity for the landing page demo."""
+        import json as _json
+        try:
+            body = await request.json()
+            entity = body.get("entity", "").strip()
+            if not entity or len(entity) > 200:
+                return JSONResponse({"error": "Provide an entity (max 200 chars)"}, status_code=400)
+            result = await classify_entity(entity, None)
+            return JSONResponse(result)
+        except _json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # Create combined app: landing page at /, demo at /demo, REST API at /api, MCP at /mcp
     combined = Starlette(
         routes=[
+            Route("/", homepage),
+            Route("/demo/stats", demo_stats),
+            Route("/demo/classify", demo_classify, methods=["POST"]),
             Mount("/api", app=rest_api),
-            Mount("/", app=mcp_app),
+            Mount("/mcp", app=mcp_app),
         ],
         middleware=[Middleware(BearerAuthMiddleware)],
         lifespan=chained_lifespan,
