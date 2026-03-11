@@ -2981,13 +2981,14 @@ rest_api = FastAPI(
     version="0.1.0",
 )
 
-# Add CORS middleware for browser access
+# Add CORS middleware — restrict origins in production via UHT_CORS_ORIGINS
+_cors_origins = settings.cors_origins.split(",") if settings.cors_origins else ["*"]
 rest_api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=bool(settings.cors_origins),  # only with explicit origins
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -3449,6 +3450,16 @@ def create_combined_app():
     from starlette.responses import HTMLResponse, JSONResponse
     from starlette.routing import Mount, Route
 
+    class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+        """Add security headers to all responses."""
+
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            return response
+
     class BearerAuthMiddleware(BaseHTTPMiddleware):
         """Require Bearer token on all requests when api_key is configured."""
 
@@ -3458,11 +3469,9 @@ def create_combined_app():
             # Allow landing page and demo endpoints without auth
             if request.url.path == "/" or request.url.path.startswith("/demo/"):
                 return await call_next(request)
-            # Check Authorization header first, then ?token= query param
+            # Check Authorization header only (never accept tokens in query params)
             auth = request.headers.get("Authorization", "")
             if auth == f"Bearer {settings.api_key}":
-                return await call_next(request)
-            if request.query_params.get("token") == settings.api_key:
                 return await call_next(request)
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
@@ -3498,7 +3507,8 @@ def create_combined_app():
                 ],
             })
         except Exception as e:
-            return JSONResponse({"entity_count": 0, "sample_entities": [], "error": str(e)})
+            logger.error("demo_stats failed", error=str(e))
+            return JSONResponse({"entity_count": 0, "sample_entities": []})
 
     async def demo_classify(request):
         """Public endpoint: classify a single entity for the landing page demo."""
@@ -3513,7 +3523,8 @@ def create_combined_app():
         except _json.JSONDecodeError:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            logger.error("demo_classify failed", error=str(e))
+            return JSONResponse({"error": "Classification failed"}, status_code=500)
 
     # Create combined app: landing page at /, demo at /demo, REST API at /api, MCP at /mcp
     combined = Starlette(
@@ -3524,7 +3535,10 @@ def create_combined_app():
             Mount("/api", app=rest_api),
             Mount("/mcp", app=mcp_app),
         ],
-        middleware=[Middleware(BearerAuthMiddleware)],
+        middleware=[
+            Middleware(SecurityHeadersMiddleware),
+            Middleware(BearerAuthMiddleware),
+        ],
         lifespan=chained_lifespan,
     )
 

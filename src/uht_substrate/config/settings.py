@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # Neo4j Database
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
-    neo4j_password: str = Field(default="uhtsubstrate123")
+    neo4j_password: str = Field(default="")
     neo4j_database: str = "neo4j"
 
     # Reasoning Configuration
@@ -39,6 +39,12 @@ class Settings(BaseSettings):
 
     # Authentication
     api_key: str = Field(default="", description="Bearer token for API auth. Empty = no auth.")
+
+    # CORS
+    cors_origins: str = Field(
+        default="",
+        description="Comma-separated allowed origins. Empty = allow all (dev only).",
+    )
 
     # Logging
     log_level: str = "INFO"
