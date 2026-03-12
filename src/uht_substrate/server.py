@@ -755,14 +755,14 @@ async def list_entities(
         hex_pattern: Filter by hex code pattern (e.g., "C688" for tools)
         name_contains: Filter by name substring (case-insensitive)
         namespace: Filter by namespace (e.g., "SE", "SE:aerospace"). Includes descendants.
-        limit: Maximum number of results (1-100)
+        limit: Maximum number of results (1-500)
         offset: Skip first N results for pagination (default 0)
         source: "local" (Neo4j only), "factory" (UHT API only), or "both"
 
     Returns:
         List of entities with names, hex codes, and source
     """
-    limit = min(max(limit, 1), 100)
+    limit = min(max(limit, 1), 500)
     offset = max(offset, 0)
     results = []
     total = 0
@@ -911,7 +911,7 @@ async def search_by_traits(
     ritualised: bool | None = None,
     ethically_significant: bool | None = None,
     # Limit
-    limit: int = 20,
+    limit: int = 100,
 ) -> dict[str, Any]:
     """
     Search for entities matching specific trait constraints.
@@ -961,7 +961,7 @@ async def search_by_traits(
         politicised: Bit 30 - Subject to political contestation
         ritualised: Bit 31 - Involves ritualistic practices
         ethically_significant: Bit 32 - Raises ethical considerations
-        limit: Maximum results (1-100)
+        limit: Maximum results (1-500)
 
     Returns:
         List of matching entities with hex codes
@@ -1018,7 +1018,7 @@ async def search_by_traits(
         return {"error": "Specify at least one trait constraint"}
 
     try:
-        entities = await ctx.uht.search_by_pattern(pattern_str, limit=min(limit, 100))
+        entities = await ctx.uht.search_by_pattern(pattern_str, limit=min(limit, 500))
 
         # Store returned entities in local graph for future lookups
         await _store_factory_entities(entities, source="uht_factory")
@@ -3110,7 +3110,7 @@ async def api_map_properties_to_traits(request: MapPropertiesToTraitsRequest):
 async def api_list_entities(
     name_contains: str = Query(default="", description="Filter by name substring"),
     hex_pattern: str = Query(default="", description="Filter by hex pattern"),
-    limit: int = Query(default=50, ge=1, le=100, description="Max results"),
+    limit: int = Query(default=50, ge=1, le=500, description="Max results"),
     offset: int = Query(default=0, ge=0, description="Skip N results"),
 ):
     """List entities in local graph."""
@@ -3164,7 +3164,7 @@ async def api_search_by_traits(
     politicised: bool | None = Query(default=None, description="Bit 30"),
     ritualised: bool | None = Query(default=None, description="Bit 31"),
     ethically_significant: bool | None = Query(default=None, description="Bit 32"),
-    limit: int = Query(default=20, ge=1, le=100, description="Max results"),
+    limit: int = Query(default=100, ge=1, le=500, description="Max results"),
 ):
     """Search Factory corpus by trait pattern."""
     return await search_by_traits(

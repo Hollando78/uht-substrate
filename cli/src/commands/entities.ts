@@ -99,17 +99,17 @@ export function registerEntityCommands(
   entities
     .command("search-traits")
     .description("Search entities by trait pattern (use --<trait-name> or --no-<trait-name>)")
-    .option("-l, --limit <n>", "Max results", "20")
+    .option("-l, --limit <n>", "Max results", "100")
     .allowUnknownOption(true)
     .action(async function (this: Command) {
       const rawArgs = this.args;
       const query: Record<string, string> = {};
-      let limit = "20";
+      let limit = "100";
 
       for (let i = 0; i < rawArgs.length; i++) {
         const arg = rawArgs[i]!;
         if (arg === "--limit" || arg === "-l") {
-          limit = rawArgs[++i] ?? "20";
+          limit = rawArgs[++i] ?? "100";
           continue;
         }
         // --trait-name or --no-trait-name
