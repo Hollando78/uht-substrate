@@ -613,7 +613,7 @@ async def classify_entity(
                     )
                     context = f"{prior_context} {context}".strip() if context else prior_context
             except Exception as e:
-                log.warning("Semantic priors failed, continuing without", error=str(e))
+                logger.warning("Semantic priors failed, continuing without", error=str(e))
         # Resolve classification: local graph first, then Factory API
         result = await _resolve_classification(
             entity_name=entity,
@@ -624,7 +624,7 @@ async def classify_entity(
 
         # Validate: if fresh classification returned all-zero, log and warn
         if result.hex_code == "00000000" and force_refresh:
-            log.warning(
+            logger.warning(
                 "Fresh classification returned 00000000 — Factory may have failed",
                 entity=entity,
                 has_context=bool(context),
@@ -674,7 +674,7 @@ async def classify_entity(
 
         return response
     except Exception as e:
-        log.error("classify_entity failed", entity=entity, error=str(e))
+        logger.error("classify_entity failed", entity=entity, error=str(e))
         return {"error": f"Classification failed: {str(e)}"}
 
 
@@ -1118,7 +1118,7 @@ async def create_namespace(
             "created_at": str(ns.created_at),
         }
     except Exception as e:
-        log.error("create_namespace failed", code=code, error=str(e))
+        logger.error("create_namespace failed", code=code, error=str(e))
         return {"error": f"Failed to create namespace: {str(e)}"}
 
 
@@ -1163,7 +1163,7 @@ async def list_namespaces(
             "namespaces": results,
         }
     except Exception as e:
-        log.error("list_namespaces failed", error=str(e))
+        logger.error("list_namespaces failed", error=str(e))
         return {"error": f"Failed to list namespaces: {str(e)}"}
 
 
@@ -1212,7 +1212,7 @@ async def assign_to_namespace(
             "success": True,
         }
     except Exception as e:
-        log.error("assign_to_namespace failed", error=str(e))
+        logger.error("assign_to_namespace failed", error=str(e))
         return {"error": f"Failed to assign entity: {str(e)}"}
 
 
